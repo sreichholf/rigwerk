@@ -1,6 +1,5 @@
-//! Playback through an ASIO driver, fed by any input.  The output driver is
-//! created on `rigwerk-asio-output`, so its control panel is opened on that
-//! thread between callbacks.
+//! The output driver is created on `rigwerk-asio-output`, so its panel
+//! is opened on that thread, between callbacks.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
@@ -33,16 +32,15 @@ pub(crate) fn run_asio_output_bridge(
     shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
-    // One ASIO driver can carry both directions.  That is the cleanest case:
-    // a single callback moves input into the ring and output out of it.
+    // The same driver on both sides: one callback, no second clock.
     if config.asio_clsid == Some(output_clsid) {
         return run_asio_duplex_bridge(config, output_clsid, shared, stop);
     }
 
     if let Some(input_clsid) = config.asio_clsid {
-        // Two drivers keep two clocks.  Prepare the input first and publish
-        // its real rate, so the output worker designs the resampler before
-        // its driver starts.  The input driver starts once the output runs.
+        // Two clocks.  Prepare the input first and publish its real rate,
+        // so the output worker designs the resampler before its driver
+        // starts.  The input starts once the output runs.
         shared.set_status("Opening ASIO input…");
         let input =
             prepare_asio_input(input_clsid, config.sample_rate, config.buffer_size, &shared)?;
@@ -63,9 +61,8 @@ pub(crate) fn run_asio_output_bridge(
         drop(extra_outputs);
         drop(worker);
     } else {
-        // Open the input first and publish its real rate, so the ASIO output
-        // worker designs the resampler before its driver starts rather than
-        // inside the first audio callback.
+        // Open the input first and publish its real rate, so the resampler
+        // is designed before the driver starts, not in the first callback.
         shared.set_status("Opening input…");
         let input_device = open_input_device(config)?;
         let input_config = pick_input_config(&input_device, config.sample_rate)?;
@@ -173,10 +170,9 @@ pub(crate) fn open_asio_output_worker(
             Err(error)
         }
         Err(error) => {
-            // Same as the WASAPI open: never leave a driver open running
-            // detached, or a later run could open the device a second
-            // time.  The bridge thread stays alive until the driver returns,
-            // so the engine keeps reporting the teardown as pending.
+            // Never leave a driver running detached: a later run could open
+            // the device a second time.  This thread stays until the driver
+            // returns, so teardown stays pending.
             worker_stop.store(true, Ordering::Relaxed);
             let _ = handle.join();
             Err(format!("ASIO output did not start: {error}"))
@@ -237,9 +233,8 @@ pub(crate) fn run_asio_output_loop(
         let _ = ready.send(Err(error.clone()));
         return Err(error);
     }
-    // Cap at the map's addressable width so routing layer ② can reach every
-    // open channel.  Unused channels follow the clock output's unused mode
-    // (Silent vs MonoCopy).
+    // Capped so routing layer ② can reach every open channel.  Unused
+    // channels follow the clock output's unused mode (Silent vs MonoCopy).
     let output_channels = (counts.out as usize).min(crate::audio::MAX_OUTPUT_CHANNELS);
 
     let buffer = driver
@@ -316,7 +311,7 @@ pub(crate) fn run_asio_output_loop(
     };
 
     // Publish the rate before the driver starts so the UI can reload
-    // plugins on its own thread before the first callback.
+    // plugins before the first callback.
     shared.set_output(
         rate,
         buffer_frames.max(1) as u32,
@@ -381,8 +376,8 @@ pub(crate) fn run_asio_output_loop(
     Ok(())
 }
 
-/// Fills both ping-pong buffers of every output channel with silence.  The
-/// driver may start playing before the first callback fills a buffer.
+/// Both ping-pong buffers: the driver may start playing before the first
+/// callback fills one.
 pub(crate) fn silence_asio_output(
     buffers: &[[*mut std::ffi::c_void; 2]],
     channel_types: &[azo::sys::SampleType],

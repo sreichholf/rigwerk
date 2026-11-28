@@ -1,22 +1,12 @@
-//! Built-in cabinet impulse response, one per signal path.
+//! The callback never reads a file, resamples, or drops a [`CabKernel`].
+//! The UI thread plans the FFTs and queues the kernel; the callback only
+//! `try_lock`s and runs those plans.  A kernel it replaces is parked,
+//! and only the UI thread drains [`CabPark`].
 //!
-//! The cabinet always sits after the plugin effects and after the built-in
-//! NAM blocks, after whichever side of the effects they are on.  It adds no
-//! latency: nothing here is reported into path alignment.  The first
-//! [`PARTITION`] taps are a direct FIR.  The rest is uniformly partitioned
-//! overlap-save: the UI thread plans the FFTs and stores each partition's
-//! spectrum on the [`CabKernel`], and the callback only runs those plans on
-//! scratch the stage allocated up front.  The callback never reads a file, never
-//! resamples, and never drops a [`CabKernel`].  The UI thread builds one
-//! and queues it.  The callback only `try_lock`s that queue at the start
-//! of a block.  A kernel it replaces is moved into [`CabPark`], and only
-//! the UI thread drains that park.
-//!
-//! Both channels are convolved.  The left taps filter channel 0 and the
-//! right taps filter channel 1.  A kernel whose sample rate is not the
-//! block rate is retired and not heard.  Bypass fades to the dry sample
-//! and then the convolution state is cleared, so a bypassed cabinet does
-//! not run.
+//! The first [`PARTITION`] taps are a direct FIR.  The rest is uniformly
+//! partitioned overlap-save, so the cabinet adds no latency.  A kernel
+//! whose rate is not the block rate is retired and not heard.  Bypass
+//! fades to dry, then the convolution state is cleared.
 
 use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 
@@ -26,96 +16,73 @@ use serde::{Deserialize, Serialize};
 
 use super::mixer::ramp::Ramp;
 
-/// How long bypass, a swap, and a clear crossfade.  Long enough that the
-/// switch does not click.
+/// Long enough that the switch does not click.
 const BYPASS_FADE_SECONDS: f32 = 0.005;
 
-/// Longest cabinet kept, in milliseconds, at rates up to [`CAB_MAX_RATE`].
-/// A higher rate still stores [`CAB_MAX_TAPS`] samples, so the kept sound
-/// is shorter than 50 ms.  Longer files are cut to this after resampling,
-/// and again after the cut filters ring.
+/// Above [`CAB_MAX_RATE`] the tap cap wins, so the kept sound is under
+/// 50 ms.  Longer files are cut after resampling and after the cuts ring.
 pub const CAB_MAX_MS: f32 = 50.0;
 
-/// Highest rate the history is built for.  50 ms at this rate is
-/// [`CAB_MAX_TAPS`].
 pub(crate) const CAB_MAX_RATE: u32 = 192_000;
 
-/// History and scratch length.  The callback never grows it.
+/// The callback never grows it.
 pub const CAB_MAX_TAPS: usize = (CAB_MAX_RATE / 20) as usize;
 
-/// Direct-form head, and the uniform partition.  128 taps is a couple of
-/// milliseconds at 48 kHz: enough for the FFT tail to hide behind, and
-/// short enough that the head is a small dot product.  The overlap-save
-/// transform is twice this, so a partition finishes before its tail is due
-/// and the cabinet adds no latency.
+/// Direct head and the uniform partition.  Long enough for the FFT tail
+/// to hide behind, short enough that the head is a small dot product.
+/// The transform is twice this, so a partition finishes before its tail
+/// is due and the cabinet adds no latency.
 const PARTITION: usize = 128;
 
-/// Overlap-save length.  Two partitions, one of them the overlap.
+/// Two partitions, one of them the overlap.
 const FFT_LEN: usize = PARTITION * 2;
 
-/// Tail partitions the stage keeps.  The longest IR uses every one.
 const TAIL_PARTS: usize = (CAB_MAX_TAPS - PARTITION).div_ceil(PARTITION);
 
-/// Level trim, the same span as the NAM trims.
 pub const CAB_MIN_LEVEL_DB: f32 = -24.0;
 pub const CAB_MAX_LEVEL_DB: f32 = 24.0;
 
-/// Low cut.  0 is off.
+/// 0 is off.
 pub const CAB_MAX_LOW_CUT_HZ: f32 = 500.0;
 
-/// A non-zero high cut sits in this span.  0 is off.  A value below the
-/// minimum clamps up to it.
+/// 0 is off.  A non-zero value below the minimum clamps up to it.
 pub const CAB_MIN_HIGH_CUT_HZ: f32 = 1_000.0;
 pub const CAB_MAX_HIGH_CUT_HZ: f32 = 20_000.0;
 
-/// Samples quieter than this at the start of an IR are a dead preamble.
+/// Quieter than this at the start of an IR is a dead preamble.
 const LEADING_SILENCE: f32 = 1.0e-5;
-/// How much of that preamble may be removed.  The body of the IR stays.
+/// How much of that preamble may go.  The body of the IR stays.
 const LEADING_TRIM_MS: f32 = 10.0;
-/// Half-Hann fade on the end of the stored kernel.  A tail that has not
-/// died away otherwise ends in a step, and that step rings.
+/// A tail that has not died away otherwise ends in a step, and rings.
 const TAIL_FADE_MS: f32 = 5.0;
-/// How long each cut filter may ring, on silence, before the 50 ms cut.
+/// How long each cut may ring, on silence, before the 50 ms cut.
 const FILTER_RING_MS: f32 = 20.0;
-/// A peak below this is not a speaker.  Do not boost it.
+/// Not a speaker.  Do not boost it.
 const UNUSABLE_PEAK: f32 = 1.0e-6;
-/// Sum of squares of both channels, on the stored kernel.  One gain for
-/// both, so a mono file stored twice keeps its balance and each channel
-/// carries half of this.
+/// One gain for both channels, so a mono file stored twice keeps its
+/// balance and each channel carries half of this.
 const TARGET_ENERGY: f32 = 1.0;
-/// Below this the IR is silence with a numerical peak.  Do not boost it.
+/// Silence with a numerical peak.  Do not boost it.
 const UNUSABLE_ENERGY: f32 = 1.0e-12;
 
-/// Kaiser-windowed sinc.  A few hundred taps, and the window is shaped for
-/// about [`SINC_STOPBAND_DB`] of attenuation.  This runs once, on the UI
-/// thread, while an impulse is loaded.  It is not the live clock bridge
+/// UI thread, once, while an impulse is loaded.  Not the clock bridge
 /// in `audio/resampler.rs`.
 const SINC_TAPS: usize = 255;
 const SINC_HALF: f64 = SINC_TAPS as f64 / 2.0;
-/// Stopband the Kaiser beta is calculated for.
 const SINC_STOPBAND_DB: f64 = 100.0;
 
-/// How many kernels the park can hold without allocating.  The callback
-/// refuses to grow it.
+/// The callback refuses to grow it.
 const PARK_SLOTS: usize = 16;
 
-/// Numeric controls the mix and the callback share.  The file path is not
-/// here: copying it into the callback would allocate, and [`PathMix`] stays
-/// [`Copy`].
-///
-/// [`PathMix`]: super::path::PathMix
+/// The callback's copy.  The path is not here: copying it would
+/// allocate, and [`PathMix`](super::path::PathMix) stays [`Copy`].
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CabControls {
-    /// Header On/Bypass.  Off skips the FIR.
     pub enabled: bool,
-    /// Output trim, dB.
     pub level_db: f32,
-    /// True inverts the kernel.
     pub polarity: bool,
-    /// High-pass, Hz.  0 leaves the low end alone.
     pub low_cut_hz: f32,
-    /// Low-pass, Hz.  0 leaves the high end alone.
     pub high_cut_hz: f32,
 }
 
@@ -143,7 +110,6 @@ impl CabControls {
     }
 }
 
-/// Settings persistence and the app share, including the impulse path.
 /// Not [`Copy`]: the path is a [`String`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -862,12 +828,8 @@ impl CabPark {
         drop(kernels);
     }
 
-    /// Moves `kernel` into the park.  One try, and no allocation: a full
-    /// queue or a busy lock hands the kernel back.  The callback holds it
-    /// and tries again next block.
-    ///
-    /// The kernel is returned by value.  Boxing that `Err` would allocate
-    /// on the audio thread, which is what this handshake exists to avoid.
+    /// One try, no allocation.  A full queue or a busy lock hands it
+    /// back by value: boxing the `Err` would allocate on the callback.
     #[allow(clippy::result_large_err)]
     pub(crate) fn try_retire(&self, kernel: CabKernel) -> Result<(), CabKernel> {
         match self.kernels.try_lock() {
@@ -877,13 +839,9 @@ impl CabPark {
         }
     }
 
-    /// Moves `kernel` into the park, retrying while the UI holds the lock.
-    ///
-    /// Not for the realtime callback.  The UI holds this mutex only inside
-    /// [`Self::flush`] and does not wait on the caller, so a busy lock
-    /// ends.  A full queue cannot grow here: the kernel is leaked rather
-    /// than dropped on this thread or spun on forever.  That is the bridge
-    /// thread tearing a run down while the park is already full.
+    /// Not for the realtime callback.  A full queue leaks the kernel
+    /// rather than dropping it here or spinning: the bridge is tearing
+    /// a run down while the park is already full.
     pub(crate) fn retire(&self, kernel: CabKernel) {
         let mut waiting = Some(kernel);
         while let Some(kernel) = waiting.take() {
@@ -926,11 +884,9 @@ fn park_into(queue: &mut Vec<CabKernel>, kernel: CabKernel) -> Result<(), CabKer
     }
 }
 
-/// The cabinet stage inside one [`PathProcessor`](super::mixer::path::PathProcessor).
-///
-/// The convolution state is sized in [`Self::new`] for [`CAB_MAX_TAPS`] at
-/// [`CAB_MAX_RATE`].  The callback never grows it.  [`Self::begin`] is the
-/// only place the callback touches the queue, and it only `try_lock`s.
+/// Sized in [`Self::new`] for [`CAB_MAX_TAPS`] at [`CAB_MAX_RATE`].
+/// The callback never grows it.  [`Self::begin`] is the only place it
+/// touches the queue, and it only `try_lock`s.
 pub(crate) struct CabStage {
     kernel: Option<CabKernel>,
     /// The kernel fading out during a swap or a clear.
@@ -941,7 +897,6 @@ pub(crate) struct CabStage {
     park: Option<Arc<CabPark>>,
     /// The rate `kernel` was built for.  0 when it must not run.
     kernel_rate: u32,
-    /// The block rate [`Self::begin`] last saw.
     rate: u32,
     settings: CabControls,
     /// The controls version last applied.  0 until the first block, which
@@ -958,21 +913,17 @@ pub(crate) struct CabStage {
     /// Doubled head history per channel.  Sample `i` is written at `i` and
     /// at `i + PARTITION`, so the last partition is one contiguous slice.
     head: [Vec<f32>; 2],
-    /// The input partition being filled, per channel.
     part_in: [Vec<f32>; 2],
     /// The previous input partition: the overlap-save prefix.
     prev: [Vec<f32>; 2],
-    /// Input spectra, [`TAIL_PARTS`] of [`FFT_LEN`].  Shared by both kernels.
+    /// Shared by both kernels.
     spectra: [Vec<Complex<f32>>; 2],
-    /// Tail contribution of the partition in progress.
     tail_live: [Vec<f32>; 2],
     tail_old: [Vec<f32>; 2],
     fft_buf: Vec<Complex<f32>>,
     fft_acc: Vec<Complex<f32>>,
     fft_scratch: Vec<Complex<f32>>,
-    /// Next sample inside the partition, `0..PARTITION`.
     part_pos: usize,
-    /// Next spectrum slot to write.
     spec_pos: usize,
     /// The state is already zero.  Bypass does not fill it again.
     history_silent: bool,
@@ -1517,13 +1468,10 @@ impl CabStage {
 
 impl Drop for CabStage {
     fn drop(&mut self) {
-        // `OutputMixer` (and these processors) is moved into the output
-        // callback and dropped when that stream stops, on the bridge
-        // thread, after the callback has returned.  This `Drop` is not the
-        // realtime callback.  A kernel is therefore moved into the park
-        // here and dropped later by `CabPark::flush` on the UI thread.
-        // With no park the stage never left the thread that built it (a
-        // unit test); that thread may drop the kernel.
+        // Dropped on the bridge thread after the callback has returned,
+        // so this is not the realtime callback.  Kernels are parked for
+        // `CabPark::flush`.  With no park the stage never left the
+        // thread that built it.
         let Some(park) = self.park.clone() else {
             return;
         };

@@ -1,8 +1,5 @@
-//! The tuner page's state: persisted settings, the throttled analysis poll and
-//! the auto-mute rule.  The pinned string and the one the All-strings face
-//! follows are screen state only; they are not written to preferences.  All
-//! DSP lives in [`crate::audio::tuner`]; this module only decides when it
-//! runs and with which settings.
+//! The pinned string, and the one All-strings follows, are not saved.
+//! The DSP lives in `audio::tuner`.
 
 use crate::app::LogTone;
 use std::time::{Duration, Instant};
@@ -13,14 +10,12 @@ use crate::audio::{
     tuning_index, AudioEngine, EngineState, TunerAnalysis, TunerChannel, TunerFrame,
     TunerTolerance, Tuning, DEFAULT_PRESET_ID, TAP_COPY_FRAMES, TUNINGS,
 };
-/// The A4 reference the page offers.  415 is the bottom of the baroque range
-/// and 466 the top of the classical one.
+/// 415 is the bottom of the baroque range and 466 the top of the classical one.
 pub(crate) const REFERENCE_MIN_HZ: f32 = 415.0;
 pub(crate) const REFERENCE_MAX_HZ: f32 = 466.0;
 pub(crate) const DEFAULT_REFERENCE_HZ: f32 = 440.0;
 
-/// The analysis is cheap but not free: one poll per 40 ms keeps the page at
-/// 25 Hz and leaves the frame loop alone.
+/// One poll per 40 ms, so the frame loop is left alone.
 const POLL_INTERVAL: Duration = Duration::from_millis(40);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

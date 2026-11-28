@@ -1,5 +1,7 @@
-//! Plugin loading, the restore order, state capture, and the helpers that
-//! keep the saved control values in step with the plugin.  UI thread.
+//! Saved controls stay in step with the plugin.  UI thread.
+//!
+//! A fresh instance gets the opaque state blob, then only the parameter
+//! values the blob does not already cover.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,21 +13,15 @@ use super::handle::{LoadedPlugin, Saved};
 use super::link::PluginShared;
 use super::pref::{PluginFormat, PluginParamPref, PluginParamView, PluginPref, PluginState};
 
-/// One control value a plugin reported as changed, with the text its own
-/// formatter gives it.
 pub(crate) struct ParamChange {
     pub(crate) id: u32,
     pub(crate) value: f64,
     pub(crate) display: Option<String>,
 }
 
-/// Applies editor edits to the cached views and the saved values, touching
-/// only the ids they name.  Every known change is applied; the
-/// return value is `false` when any id was not in the cached views (a control
-/// the plugin added or renamed), which asks the caller for a full read.  The
-/// saved list keeps [`merge_synced_params`]'s semantics: every live value
-/// away from its default, plus saved entries the plugin does not list.
-/// Changes that are already at their default therefore leave it.
+/// Applies editor edits to the cached views and saved values.  Returns
+/// false when an id is missing from the views (the plugin added or
+/// renamed a control), so the caller does a full read.
 pub(crate) fn apply_parameter_changes(
     parameters: &mut [PluginParamView],
     saved: &mut Vec<PluginParamPref>,
@@ -53,9 +49,8 @@ pub(crate) fn apply_parameter_changes(
     all_known
 }
 
-/// The capture of `bytes` a plugin saved, with `params` as the blob's
-/// snapshot of the saved values.  An empty or oversized blob is a failed
-/// capture.
+/// An empty or oversized blob is a failed capture.  `params` is the
+/// blob's snapshot of the saved values.
 pub(crate) fn captured_state(bytes: &[u8], params: &[PluginParamPref]) -> Capture {
     if bytes.is_empty() {
         Capture::Failed
@@ -70,41 +65,33 @@ pub(crate) fn captured_state(bytes: &[u8], params: &[PluginParamPref]) -> Captur
     }
 }
 
-/// The largest state blob kept in the preferences file.
+/// Cap for a blob stored in the preferences file.
 pub(crate) const MAX_STATE_BLOB: usize = 8 * 1024 * 1024;
 
-/// The outcome of [`super::PluginHandle::capture_state`].
 #[derive(Debug)]
 pub(crate) enum Capture {
     Saved(PluginState),
     /// The plugin cannot save its state; the previous blob is kept.
     Failed,
-    /// Values are still queued for the plugin, so its state would be older
-    /// than the saved parameters; the slot stays stale and the next save
-    /// tries again.
+    /// Values are still queued, so the blob would be older than the saved
+    /// parameters.  The slot stays stale and the next save tries again.
     Deferred,
 }
 
 impl Capture {
-    /// Whether the slot still needs a capture afterwards.
     pub(crate) fn leaves_stale(&self) -> bool {
         matches!(self, Capture::Deferred)
     }
 }
 
-/// The largest block a plugin is asked to process, and the block size it is
-/// set up with.  Many plugins allocate fixed internal buffers for the size
-/// announced at setup and ignore the smaller `numSamples` passed later, so a
-/// big 4096-frame announcement makes them write past those buffers and can
-/// take the whole app down (Eye Scream Man does exactly this).  512 frames is
-/// the size every VST3/CLAP/LV2 effect can be expected to handle, and longer
-/// bridge blocks are split into chunks of this size below.
+/// Largest block a plugin is set up for and asked to process.  Many
+/// plugins size internal buffers from the setup announcement and ignore a
+/// smaller `numSamples`, so a 4096-frame announcement writes past them
+/// (Eye Scream Man).  512 is the size every effect here is expected to
+/// handle; longer bridge blocks are split.
 pub(crate) const MAX_BLOCK: usize = 512;
 
-/// What a fresh instance gets restored with, in this order: the opaque state
-/// blob, then the parameter values it does not already cover.
 pub(crate) struct Restore<'a> {
-    /// Decoded state bytes, if the pref holds a usable blob.
     pub(crate) state: Option<Vec<u8>>,
     pref: &'a PluginPref,
 }
@@ -117,8 +104,7 @@ impl<'a> Restore<'a> {
         }
     }
 
-    /// The parameter values to apply once the state blob was (or was not)
-    /// loaded.  `None` asks for the parameter's default.
+    /// `None` asks for the parameter's default.
     pub(crate) fn params(&self, state_loaded: bool) -> Vec<(u32, Option<f64>)> {
         let snapshot = if state_loaded {
             self.pref
@@ -135,12 +121,11 @@ impl<'a> Restore<'a> {
 /// The values two parameter lists may differ by and still count as equal.
 const PARAM_EPSILON: f64 = 0.0005;
 
-/// Which saved parameters still need applying.  Without a restored state
-/// blob that is every saved value.  After one, it is only what changed since
-/// the blob was captured: a value that differs from (or is missing in) the
-/// blob's snapshot, and a parameter that went back to its default (`None`),
-/// which the saved list no longer names.  An unchanged list applies
-/// nothing, so the blob takes precedence.
+/// Without a restored blob, every saved value.  After one, only what
+/// changed since the capture: a value that differs from or is missing in
+/// the snapshot, and a parameter back at its default (`None`), which the
+/// saved list no longer names.  An unchanged list applies nothing, so
+/// the blob takes precedence.
 pub(crate) fn params_to_restore(
     saved: &[PluginParamPref],
     snapshot: Option<&[PluginParamPref]>,
@@ -165,11 +150,10 @@ pub(crate) fn params_to_restore(
         .collect()
 }
 
-/// The saved parameter list after reading the plugin's live controls: every
-/// writable control away from its default, plus any saved entry the plugin
-/// does not list (an id hidden or renamed by this plugin version), which a
-/// sync must not silently delete.  A read-only control is output the plugin
-/// reports, not a setting this app owns, so it is never saved.
+/// Every writable control away from its default, plus a saved entry the
+/// plugin does not list (hidden or renamed), which a sync must not
+/// delete.  A read-only control is plugin output, not a setting this app
+/// owns, so it is never saved.
 pub(crate) fn merge_synced_params(
     previous: &[PluginParamPref],
     live: &[PluginParamView],
@@ -190,9 +174,8 @@ pub(crate) fn merge_synced_params(
         .collect()
 }
 
-/// Opens the plugin with its saved state and controls applied.  The flag says
-/// whether the saved state blob still describes the new instance exactly (it
-/// restored and no newer control value had to be applied on top); the
+/// The flag is whether the saved blob still describes the new instance
+/// exactly (it restored, and no newer control had to be applied).  The
 /// instance starts stale otherwise.
 pub(crate) fn load_plugin(
     pref: &PluginPref,
@@ -280,8 +263,8 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Makes [`load_plugin`] on this thread load [`TEST_PATH`] prefs through
-/// `loader`, until the guard drops.
+/// Until the guard drops, [`load_plugin`] on this thread loads
+/// [`TEST_PATH`] prefs through `loader`.
 #[cfg(test)]
 pub(crate) fn set_test_loader(
     loader: impl FnMut(&PluginPref, u32) -> Result<(LoadedPlugin, bool), String> + 'static,

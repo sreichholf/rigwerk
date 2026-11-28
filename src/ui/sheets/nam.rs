@@ -1,18 +1,6 @@
-//! The NAM sheet's body: the models folder, the captures in it, and the
-//! block that is being edited — where it sits, its trims, its width, and
-//! whether it matches the level of the block before it.
-//!
-//! A `.nam` file is a frozen capture, so there are no amp knobs.  The
-//! header above (`sheets.rs`) already holds *On* / *Bypass*.  The width
-//! dial is only there when the loaded file is a SlimmableContainer.  The
-//! captures and the settings are
-//! [`catalog_columns`](super::catalog::catalog_columns), the same split the
-//! cab sheet uses.  The page calls [`RigWerkApp`] methods; it does not touch
-//! the engine.
-//!
-//! A path with no block still gets this sheet: the list picks the first
-//! capture, which makes the first block.  From the fifth block on, *Add
-//! block* asks once more, because a stack that deep is a DSP decision.
+//! The NAM sheet.  A `.nam` file is a frozen capture, so there are no amp
+//! knobs.  The page calls `RigWerkApp` and does not touch the engine.
+//! From the fifth block on, adding a block asks once more.
 
 use eframe::egui;
 use egui::{Align, Layout, RichText, Vec2};
@@ -36,8 +24,7 @@ fn percent(share: f32) -> String {
 }
 
 impl RigWerkApp {
-    /// The NAM sheet body for the block at `index` of path `path`; the add
-    /// view when the stack has no such block.
+    /// The add view when the stack has no block at `index`.
     pub(crate) fn nam_sheet(&mut self, ui: &mut egui::Ui, path: usize, index: usize) {
         if self.nam_rescan || self.nam_catalog.folder != self.nam_folder {
             self.rescan_models_folder();

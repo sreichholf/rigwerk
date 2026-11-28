@@ -1,33 +1,17 @@
-//! The built-in pitch shifter, one per signal path, first in the chain.
-//!
-//! Mono in, mono out: the stage hears `(L + R) * 0.5` of the path and writes
-//! its result to both channels, as the NAM blocks do.  A path with one
+//! Mono in, mono out: `(L + R) * 0.5`, written to both channels.  One
 //! channel routed loses 6 dB in that sum.
 //!
-//! The DSP is a time-domain delay-line shifter (`tight.rs` is its
-//! contract): 4 ms by default, attacks intact, for single notes and power
-//! chords; full chords chorus, less at a longer delay.  This file is the
-//! stage around it: the wet and bypass mixes, and switching on and off.
+//! The DSP is the delay-line shifter in `tight.rs`.  Reported latency is
+//! the constant `D` while on, bypassed too.  Period estimates are offset
+//! by `slot · H / MAX_PATHS`, so the paths do not estimate in one block.
 //!
-//! Latency is reported as a constant: the stage reports exactly `D`
-//! ([`tight::spec`], the delay setting) while on, bypassed too, and pads
-//! nothing; the read delay still sweeps around it between attacks
-//! (`tight.rs`).  Period estimates are scheduled on the absolute sample
-//! count, offset by `slot · H / MAX_PATHS` so the paths do not estimate in
-//! the same block; the output does not depend on the block size, per slot.
+//! [`PitchShifter::new`] allocates for 192 kHz.  `update`, `begin_block`,
+//! and `process` do not: a rate or delay change fades out, recomputes
+//! inside that storage, and fades in.
 //!
-//! Real-time safety: [`PitchShifter::new`] allocates the state at the
-//! 192 kHz sizes, whatever the rate and delay (about 139 kB per
-//! shifter).  [`PitchShifter::update`], [`PitchShifter::begin_block`] and
-//! [`PitchShifter::process`] never allocate: a rate or delay change fades
-//! out, recomputes the sizes inside that storage and fades in.
-//!
-//! Switching the stage on or off is a pre-warmed dip: switching on feeds
-//! the state alongside the dry signal until it is warm, what plays fades
-//! out, the switch lands at the next block boundary
-//! ([`PitchShifter::begin_block`]) and the new output fades in.  The
-//! reported latency changes on the block of the switch, or of a delay
-//! change.  A non-finite value anywhere clears the state and fades back in.
+//! Switching on is a pre-warmed dip that lands at a block boundary.
+//! The reported latency changes on that block, or on a delay change.
+//! A non-finite value clears the state.
 
 use serde::{Deserialize, Serialize};
 
@@ -38,7 +22,6 @@ mod tight;
 
 use tight::TightState;
 
-/// Soft limits for the UI and for [`PitchSettings::sanitized`].
 pub const PITCH_MIN_SEMITONES: i8 = -12;
 pub const PITCH_MAX_SEMITONES: i8 = 12;
 pub const PITCH_MIN_CENTS: f32 = -50.0;
@@ -49,40 +32,32 @@ pub const PITCH_MAX_DELAY_MS: f32 = 40.0;
 /// An old save without a delay keeps the delay it played at.
 const DEFAULT_DELAY_MS: f32 = 4.0;
 
-/// How long the switch dip fades out, and in again.
 const SWITCH_FADE_SECONDS: f32 = 0.008;
-/// How long bypass crossfades between the shifted and the delayed dry signal.
+/// Between the shifted signal and the delayed dry signal.
 const BYPASS_FADE_SECONDS: f32 = 0.015;
-/// How long a wet change ramps.
 const WET_RAMP_SECONDS: f32 = 0.006;
 
-/// What the stage delays a path by at `rate` and `delay_ms` while on,
-/// samples.
 pub(crate) fn pitch_latency_samples(rate: u32, delay_ms: f32) -> u32 {
     tight::spec(rate, delay_ms).latency
 }
 
-/// Settings the UI and persistence share.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PitchSettings {
-    /// Off means the stage is not in the chain: no processing, no latency.
+    /// Off is out of the chain: no processing, no latency.
     pub enabled: bool,
-    /// Only while enabled: the delayed dry signal, keeping the latency.
+    /// Delayed dry, still at the reported latency.
     pub bypass: bool,
-    /// −12 … +12.
     pub semitones: i8,
-    /// −50 … +50.
     pub cents: f32,
-    /// 0 … 1; the rest is the dry signal at the same delay.
+    /// The rest is dry at the same delay.
     pub wet: f32,
-    /// `D` in whole ms at every rate.  Longer splices less often (a
-    /// ringing chord spreads its splices further apart) but hears every
-    /// attack that much later.
+    /// Whole ms at every rate.  Longer splices less often, and hears
+    /// every attack that much later.
     pub delay_ms: f32,
 }
 
-/// Written by hand: a derived default would give `wet` 0.
+/// A derived default would give `wet` 0.
 impl Default for PitchSettings {
     fn default() -> Self {
         Self {
@@ -133,30 +108,23 @@ fn finite_or(value: f32, fallback: f32) -> f32 {
     }
 }
 
-/// Where a pending switch is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Switch {
-    /// Playing what `on` says, nothing pending.
     Steady,
     /// Feeding the state until it is warm; the dry signal still plays.
     Warming,
-    /// Fading what plays out.
     FadingOut,
     /// Faded out; the switch lands at the next block boundary.
     Silent,
-    /// Fading what now plays in.
     FadingIn,
 }
 
-/// The stage: the shifter's state, the switch, and the wet, bypass and
-/// switch fades.
 pub(crate) struct PitchShifter {
     tight: TightState,
     rate: u32,
     slot: usize,
-    /// Whether the shifted signal plays; off, the input passes untouched.
+    /// Off, the input passes untouched.
     on: bool,
-    /// What the pending switch lands on.
     next: bool,
     switch: Switch,
     /// Samples the state still needs before switching on.
@@ -166,7 +134,6 @@ pub(crate) struct PitchShifter {
     bypass: Ramp,
     /// The absolute sample count the period estimates are scheduled on.
     count: u64,
-    /// The delay `tight` runs at, ms.
     delay_ms: f32,
     /// A new rate and delay that land once what plays has faded out.
     pending: Option<(u32, f32)>,
@@ -197,12 +164,9 @@ impl PitchShifter {
         }
     }
 
-    /// Audio thread, no allocation.  Takes new settings; switching on or
-    /// off starts the dip, which lands in a later [`Self::begin_block`].  A
-    /// new `rate` or delay fades out what plays (the old sizes run on until
-    /// then), and lands in a later [`Self::begin_block`]: the sizes
-    /// recomputed inside the preallocated state, faded in.  Silent and off,
-    /// it lands at once.
+    /// No allocation.  A switch, a new rate, or a new delay fades out
+    /// and lands in a later [`Self::begin_block`].  Silent and off, it
+    /// lands at once.
     pub(crate) fn update(&mut self, settings: PitchSettings, rate: u32) {
         let settings = settings.sanitized();
         let target = settings.enabled;
@@ -308,7 +272,6 @@ impl PitchShifter {
         SWITCH_FADE_SECONDS * self.rate as f32
     }
 
-    /// Points the switch at `target`.
     fn retarget(&mut self, target: bool) {
         let fade = self.fade_samples();
         match self.switch {
@@ -329,8 +292,6 @@ impl PitchShifter {
         }
     }
 
-    /// Starts warming the state to switch on, or fades out at once to
-    /// switch off.
     fn start_switch(&mut self, target: bool) {
         self.next = target;
         if target {
@@ -370,13 +331,10 @@ impl PitchShifter {
         }
     }
 
-    /// Whether the stage touches the signal at all this block.
     pub(crate) fn is_active(&self) -> bool {
         self.on || self.switch != Switch::Steady
     }
 
-    /// One sample through the state; the shifted output, the dry input at
-    /// the same delay, and whether a non-finite value cleared the state.
     #[inline]
     fn tick(&mut self, x: f32, count: u64) -> (f32, f32, bool) {
         let hop = self.tight.spec.hop;
@@ -452,7 +410,6 @@ impl PitchShifter {
         }
     }
 
-    /// Whether a pending switch on feeds the state alongside the dry signal.
     #[inline]
     fn warming(&self) -> bool {
         match self.switch {
@@ -461,7 +418,6 @@ impl PitchShifter {
         }
     }
 
-    /// Moves the switch on after one sample.
     #[inline]
     fn advance_switch(&mut self) {
         match self.switch {

@@ -4,8 +4,7 @@ mod app;
 mod audio;
 mod ui;
 
-/// Counts what the audio callbacks allocate, so a debug build and the tests
-/// can catch an allocation on the sample path (`audio::rt_guard`).
+/// Catches an allocation on the sample path, in a debug build and the tests.
 #[cfg(debug_assertions)]
 #[global_allocator]
 static ALLOCATOR: audio::rt_guard::GuardAllocator = audio::rt_guard::GuardAllocator;
@@ -20,8 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 fn parse_screenshot() -> Option<PathBuf> {
-    // `args_os`: a non-UTF-8 path is a valid path, and the parent of a scan
-    // child may itself have one in `TEMP`.
+    // `args_os`: a non-UTF-8 path is valid, including a scan child's `TEMP`.
     let mut args = std::env::args_os().skip(1);
     while let Some(argument) = args.next() {
         if argument.as_os_str() == OsStr::new("--screenshot") {
@@ -35,11 +33,7 @@ fn parse_screenshot() -> Option<PathBuf> {
     None
 }
 
-/// The child's own arguments: `--clap-scan <file> <limit-ms>`.  Returns
-/// whether the flag was given and, when both values are there, the file and
-/// the child's own limit.  The file stays an `OsString`: the parent passes its
-/// temp path, which need not be UTF-8.  The first item is the binary's own
-/// name and is skipped, as it is in `std::env::args_os`.
+/// The scan file stays an `OsString`: the parent's temp path need not be UTF-8.
 fn parse_clap_scan(
     args: impl Iterator<Item = std::ffi::OsString>,
 ) -> (bool, Option<(PathBuf, Duration)>) {
@@ -58,9 +52,8 @@ fn parse_clap_scan(
     (false, None)
 }
 
-/// A crash inside a bundle must not open a crash dialog on a machine nobody is
-/// watching: a scan child has no window, and the dialog would wait for a click
-/// that never comes.  Called before the child starts any plugin code.
+/// A bundle crash dialog would wait forever: the scan child has no window.
+/// Call this before any plugin code.
 #[cfg(windows)]
 fn silence_child_crashes() {
     const SEM_FAILCRITICALERRORS: u32 = 0x0001;
@@ -72,20 +65,16 @@ fn silence_child_crashes() {
         fn SetErrorMode(mode: u32) -> u32;
     }
 
-    // SAFETY: `SetErrorMode` takes a plain bitmask and returns the previous
-    // mode.  It takes no pointers, holds no references and needs no cleanup,
-    // and it runs on the child's main thread before any scan thread starts, so
-    // every fault in bundle code sees it.  The previous mode is not needed.
+    // SAFETY: a bitmask, no pointers, on this thread before any scan thread,
+    // so every bundle fault sees it.  The previous mode is unused.
     unsafe {
         SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     }
 }
 
-/// A Windows release build is a GUI subsystem process, so it has no console.
-/// `--screenshot` still reports usage and save results on stdout/stderr.
-/// Attach the parent console (started from a terminal) or allocate one
-/// (double-click) before those lines run. Debug builds already have a
-/// console, and a redirected stderr handle is left alone.
+/// A Windows release build is a GUI subsystem process and has no console.
+/// `--screenshot` still writes stdout and stderr.  An existing stderr
+/// handle (a debug console, or a redirect) is left alone.
 #[cfg(windows)]
 fn ensure_screenshot_console() {
     let requested = std::env::args_os().any(|argument| {
@@ -128,9 +117,8 @@ fn ensure_screenshot_console() {
         handle.is_null() || handle as isize == -1
     }
 
-    // SAFETY: kernel32 console calls. Handles are only passed back to
-    // kernel32 and are never dereferenced. Called before any Rust stdio use,
-    // which reads the standard handles on each write.
+    // SAFETY: handles are only passed back to kernel32, never dereferenced.
+    // Before any Rust stdio, which reads the standard handles on each write.
     unsafe {
         if !handle_missing(GetStdHandle(STD_ERROR_HANDLE)) {
             return;
@@ -139,7 +127,7 @@ fn ensure_screenshot_console() {
         if !attached && AllocConsole() == 0 {
             return;
         }
-        // AllocConsole installs standard handles. AttachConsole does not, so
+        // AllocConsole installs standard handles.  AttachConsole does not, so
         // point stdout and stderr at this process's console before eprintln.
         if handle_missing(GetStdHandle(STD_ERROR_HANDLE)) {
             for std_handle in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
@@ -160,16 +148,12 @@ fn ensure_screenshot_console() {
     }
 }
 
-/// The process status a screenshot run exits with, once eframe has returned.
-/// `recorded` is the ending the run wrote, and `launch_ok` says whether eframe
-/// itself returned `Ok`.  `None` keeps eframe's own error and failure: no
-/// ending was recorded and the launch failed.
+/// `None` keeps eframe's own error: nothing was recorded and the launch failed.
 fn screenshot_exit_status(recorded: i32, launch_ok: bool) -> Option<i32> {
     if recorded != app::screenshot::NO_ENDING {
-        // A recorded ending decides the status, saved or failed.
         Some(recorded)
     } else if launch_ok {
-        // The window closed on its own without the run saving: timed out.
+        // The window closed on its own without the run saving.
         Some(app::screenshot::EXIT_RUN_TIMED_OUT)
     } else {
         None
@@ -177,11 +161,9 @@ fn screenshot_exit_status(recorded: i32, launch_ok: bool) -> Option<i32> {
 }
 
 fn main() -> eframe::Result<()> {
-    // `--clap-scan <file> <limit-ms>` is the child half of the isolated plugin
-    // scan (`audio::clap::scan_library_isolated`): scan, write the result,
-    // exit.  It comes before the screenshot console and eframe so the child
-    // opens no window and prints nothing; the parent reads only its exit
-    // status and the file.
+    // The child half of `audio::clap::scan_library_isolated`, before the
+    // screenshot console and eframe, so the child opens no window and the
+    // parent reads only the exit status and the file.
     let (scan_requested, scan) = parse_clap_scan(std::env::args_os());
     if scan_requested {
         let Some((path, limit)) = scan else {
@@ -189,10 +171,9 @@ fn main() -> eframe::Result<()> {
         };
         #[cfg(windows)]
         silence_child_crashes();
-        // The parent kills a child that overruns, but it may itself be killed
-        // or its kill may fail, so this thread is the child's own last resort.
-        // No unwinding and no destructors: a bundle's thread is not ours to
-        // join, and the exit code is all the parent reads.
+        // Last resort if the parent's kill never arrives.  `exit` skips
+        // unwinding: a bundle thread is not ours to join, and the parent
+        // reads only the code.
         std::thread::spawn(move || {
             std::thread::sleep(limit);
             std::process::exit(audio::clap::CHILD_EXIT_ABANDONED);
@@ -216,20 +197,18 @@ fn main() -> eframe::Result<()> {
         std::process::exit(2);
     }
 
-    // Screenshots need the Live page (and routing side-by-side) without a
-    // central scrollbar. Do not restore the last interactive window size.
-    // Wayland compositors ignore client resize requests, so screenshot mode
-    // drops Wayland and opens through X11/XWayland where the size sticks.
+    // A fixed size with no central scrollbar, so the last interactive size
+    // is not restored.  Wayland ignores client resize, so this mode drops
+    // it and opens through X11/XWayland.
     let screenshot_mode = screenshot.is_some();
-    // A screenshot run writes its own ending here.  It starts at a sentinel
-    // no ending uses, so `main` can tell "recorded a failure" from "recorded
-    // nothing".
+    // A sentinel no ending uses, so a recorded failure stays distinct from
+    // nothing recorded.
     let screenshot_exit = Arc::new(AtomicI32::new(app::screenshot::NO_ENDING));
     if screenshot_mode {
         #[cfg(target_os = "linux")]
         {
-            // SAFETY: no other threads have started; eframe has not opened a
-            // display yet. winit picks Wayland whenever WAYLAND_DISPLAY is set.
+            // SAFETY: no other threads have started, and eframe has not opened
+            // a display.  winit picks Wayland when `WAYLAND_DISPLAY` is set.
             unsafe {
                 std::env::remove_var("WAYLAND_DISPLAY");
                 std::env::remove_var("WAYLAND_SOCKET");
@@ -264,13 +243,10 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    // The run's own deadlines are only checked while frames are drawn.
-    // Closing the window starts eframe's teardown, the app drop and the
-    // engine stop, none of which a frame bounds, and a driver can stall
-    // there.  This one thread outside the draw pass is the bound for the
-    // whole run.  The app opens no egui child viewport: sheets and drawers
-    // are panels in the root, plugin editors are native windows the app drop
-    // closes, so closing the root is every viewport there is.
+    // Deadlines are checked only while frames are drawn.  Teardown, the app
+    // drop and the engine stop are outside that, and a driver can stall
+    // there.  Sheets and drawers are root panels; plugin editors are native
+    // windows the app drop closes, so closing the root is every viewport.
     if screenshot_mode {
         std::thread::spawn(|| {
             std::thread::sleep(app::screenshot::RUN_TIMEOUT);

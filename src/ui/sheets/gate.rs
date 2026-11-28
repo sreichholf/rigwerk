@@ -1,14 +1,5 @@
-//! The gate sheet's body (`docs/ui-spec.md` §6.1): the six gate values as
-//! sliders on the left; the position (*Before effects* / *After effects*),
-//! what it listens to (*Gated signal* / *Dry input*) and the reduction
-//! meter on the right; *Reset* above them.
-//!
-//! The header above (`sheets.rs`) already holds the gate's *On* /
-//! *Bypass*, so *Reset* keeps it.  The classic Mixer's gate card draws the
-//! same values from [`GATE_CONTROLS`] and commits through
-//! [`RigWerkApp::apply_gate`]; neither copies the other's texts.  Moving
-//! the gate also moves its chain row, which the console orders by the
-//! gate's slot.
+//! The gate sheet.  *Reset* keeps on/off.  Moving the gate also moves its
+//! chain row.
 
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, Rect, RichText, Sense, Vec2};
@@ -186,7 +177,6 @@ fn reduction_fraction(reduction_db: f32, range_db: f32) -> f32 {
 }
 
 impl RigWerkApp {
-    /// The gate sheet body for path `path`.
     pub(crate) fn gate_sheet(&mut self, ui: &mut egui::Ui, path: usize) {
         let Some(signal) = self.paths.get(path).and_then(Option::as_ref) else {
             return;

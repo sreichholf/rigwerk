@@ -1,14 +1,5 @@
-//! A path's chain on its strip (spec §4.2, §5.3): *Pitch* (not on a
-//! return), *Pre EQ*, the gate when it sits before the effects, the NAM
-//! blocks that do, the effects group, the NAM blocks after them, the
-//! cabinet, the gate when after, and *Post EQ*.
-//!
-//! The built-in rows stay pinned; only the effects group scrolls, on its
-//! own for each path so the faders stay on one line.  On overflow it shows
-//! a 3 pt thumb, a fade at the bottom edge and *n more · scroll* in it.
-//! The stage whose sheet is open is scrolled into view when it opens.
-//! Dragging an effect reorders it, and so does dragging a NAM block inside
-//! its group; the list scrolls at its edges.
+//! A path's chain on its strip.  Built-in rows stay pinned; only the
+//! effects group scrolls, so the faders stay on one line.
 
 use eframe::egui;
 use egui::{Rect, Stroke, Vec2};
@@ -25,17 +16,14 @@ use crate::ui::widgets::{
     ChainRow, EffectDrag, NamDrag, CHAIN_ROW_H,
 };
 
-/// A row and the gap under it.
+/// Includes the gap under the row.
 const ROW_PITCH: f32 = CHAIN_ROW_H + 4.0;
-/// The fade over the last visible rows when more follow.
 const FADE_H: f32 = 22.0;
-/// How close to an edge a dragged effect scrolls the list.
+/// A dragged row scrolls the list inside this distance of an edge.
 const EDGE: f32 = 16.0;
 
-/// The scroll offset that shows `top`..`bottom` in a viewport `viewport`
-/// tall now at `offset`: unchanged when it is already in view, else the
-/// smallest move that brings it in.  The console's paths group uses it
-/// sideways too.
+/// The smallest move that brings `top`..`bottom` into view.  The paths
+/// group uses it sideways too.
 pub(super) fn offset_to_show(top: f32, bottom: f32, offset: f32, viewport: f32) -> f32 {
     if top < offset {
         top.max(0.0)
@@ -46,7 +34,6 @@ pub(super) fn offset_to_show(top: f32, bottom: f32, offset: f32, viewport: f32) 
     }
 }
 
-/// How many rows lie at least partly below the viewport.
 pub(super) fn rows_below(content: f32, offset: f32, viewport: f32) -> usize {
     let hidden = content - offset - viewport;
     if hidden <= 1.0 {
@@ -56,8 +43,6 @@ pub(super) fn rows_below(content: f32, offset: f32, viewport: f32) -> usize {
     }
 }
 
-/// One NAM row as the console draws it: what the block is called, what it
-/// costs, and where it sits.
 #[derive(Clone, Debug)]
 struct NamRow {
     index: usize,
@@ -69,7 +54,6 @@ struct NamRow {
 }
 
 impl RigWerkApp {
-    /// The chain of path `slot`, at most `height` tall.
     pub(super) fn chain_column(
         &mut self,
         ui: &mut egui::Ui,
@@ -207,8 +191,6 @@ impl RigWerkApp {
             self.set_chain_bypass(bypassed);
         }
 
-        // What stays below the group: + Add effect, the NAM blocks after the
-        // effects, the cabinet, and the gate after the effects.
         let gap = ui.spacing().item_spacing.y;
         let tail_rows =
             2.0 + post.len() as f32 + f32::from(u8::from(mix.gate.slot == GateSlot::Post));
@@ -261,9 +243,8 @@ impl RigWerkApp {
         );
     }
 
-    /// The NAM blocks of one position group, one row each.  A dragged block
-    /// reorders inside its group; the mark of the heaviest block turns to the
-    /// warning colour while the DSP alarm is an error.
+    /// The heaviest block's mark turns to the warning colour while the DSP
+    /// alarm is an error.
     #[allow(clippy::too_many_arguments)]
     fn nam_rows(
         &mut self,
@@ -336,8 +317,6 @@ impl RigWerkApp {
         }
     }
 
-    /// One pinned row: the pitch shifter, an EQ, the gate, a NAM block's
-    /// way in, or the cabinet.
     #[allow(clippy::too_many_arguments)]
     fn builtin_row(
         &mut self,
@@ -379,7 +358,6 @@ impl RigWerkApp {
         self.chain_row_event(slot, stage, chain_event(&response), on);
     }
 
-    /// The effects, in a list of their own that scrolls past `height`.
     fn effect_rows(
         &mut self,
         ui: &mut egui::Ui,
@@ -473,7 +451,6 @@ impl RigWerkApp {
                             events.push((index, event, !view.bypass));
                         }
                     }
-                    // A dragged effect scrolls the list at its edges.
                     if egui::DragAndDrop::has_payload_of_type::<EffectDrag>(ui.ctx()) {
                         if let Some(pointer) = ui.ctx().pointer_hover_pos() {
                             let clip = ui.clip_rect();
@@ -506,7 +483,6 @@ impl RigWerkApp {
         }
     }
 
-    /// What a row's click, LED, double-click, menu or keys asked for.
     fn chain_row_event(
         &mut self,
         slot: usize,
@@ -544,8 +520,6 @@ impl RigWerkApp {
     }
 }
 
-/// The fade at the bottom of an overflowing effects list, with *n more ·
-/// scroll* in it.
 fn fade(ui: &egui::Ui, viewport: Rect, below: usize) {
     let colours = palette(ui.ctx());
     let rect = Rect::from_min_max(

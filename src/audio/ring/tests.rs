@@ -36,7 +36,6 @@ fn a_frame_ring_carries_every_lane_it_was_set_up_for() {
     ring.set_lanes(6);
     assert_eq!(ring.capacity_frames(), 96_000);
     assert!(ring.push(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 9.0]));
-    // A short frame pads with silence.
     assert!(ring.push(&[1.0]));
     let mut frame: LaneFrame = [7.0; FRAME_LANES];
     assert!(ring.pop(&mut frame));
@@ -58,7 +57,6 @@ fn a_full_frame_ring_refuses_the_next_push() {
     }
     assert!(!ring.push(&[0.5; FRAME_LANES]));
     assert_eq!(ring.frames(), capacity);
-    // Changing the lane count starts over, empty.
     ring.set_lanes(2);
     assert_eq!(ring.frames(), 0);
     assert_eq!(ring.capacity_frames(), 96_000);

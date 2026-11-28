@@ -1,4 +1,5 @@
-//! Realtime device mapping: controls atomics, frames and the mapper.
+//! Device maps on the callback.  No allocation.  The tick is added after
+//! the safety ceiling; the click-free lanes are copied before it.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
@@ -49,7 +50,6 @@ struct PathMap {
     right: AtomicU8,
     /// Linear gain (`f32` bits), negative when the polarity is flipped.
     gain: AtomicU32,
-    /// Alignment trim, ms (`f32` bits), already clamped.
     trim_ms: AtomicU32,
 }
 
@@ -84,34 +84,23 @@ impl PathMap {
     }
 }
 
-/// One output device's settings as the audio callback reads them, plus its
-/// per-channel meters.  The UI stores, the callback loads once per block.
-///
-/// Each signal path slot has its own channel map, level and polarity on the
-/// device; the device level, mute and the unused-channel rule belong to the
-/// device.
+/// The UI stores; the callback loads once per block.
 pub(crate) struct DeviceControls {
     maps: [PathMap; MAX_PATHS],
     silent: AtomicBool,
-    /// Linear level gain (`f32` bits), already clamped.
     gain: AtomicU32,
     mute: AtomicBool,
     /// Which channels carry the metronome.  Bit `n` is channel `n`.
     /// 0 adds the tick nowhere.
     click_mask: AtomicU8,
-    /// Block peak per device channel (`f32` bits), after the map, the
-    /// device level, the safety ceiling, the metronome and mute.  Channels
-    /// the device does not have read 0.
+    /// After the tick and mute.  A channel the device lacks reads 0.
     meters: [AtomicU32; MAX_OUTPUT_CHANNELS],
     /// Safety-limiter gain reduction, dB (`f32` bits).  0 when the device
     /// is not limiting.  Published with the meters.
     reduction_db: AtomicU32,
-    /// Target and learned trim, as the mapper reads them.
     loudness_target: AtomicU32,
     loudness_learned: AtomicU32,
-    /// The learned trim the mapper last applied, dB (`f32` bits).
     loudness_trim: AtomicU32,
-    /// Momentary, short-term and integrated loudness, LUFS (`f32` bits).
     loudness_momentary: AtomicU32,
     loudness_short_term: AtomicU32,
     loudness_integrated: AtomicU32,
@@ -120,24 +109,16 @@ pub(crate) struct DeviceControls {
     /// Bumped when a different device moves into this output slot, so the
     /// mapper drops the old device's trim and history.
     device_generation: AtomicU64,
-    /// One output Learn in progress: bumped on every start/stop, plus the
-    /// integrated reading and how many 400 ms blocks passed the absolute
-    /// gate.
+    /// One Learn.  `learn_generation` bumps on every start and stop.
     learn_active: AtomicBool,
     learn_generation: AtomicU64,
     learn_integrated: AtomicU32,
     learn_blocks: AtomicU32,
-    /// The device's real channel count, published when its stream opens.
-    /// 0 = unknown (bridge not running); the UI falls back to the device
-    /// inventory's channel count.  ASIO opens at most 4 outputs for now;
-    /// the map sees that count.
+    /// 0 means unknown, so the UI uses the inventory count.
     channels: AtomicU32,
-    /// The align switch (see [`OutputDeviceSettings::align`]).
     align: AtomicBool,
-    /// What the mapper last aligned with, for the UI: the delay per path
-    /// slot ([`NOT_ROUTED`] when the device does not play it), the path it
-    /// waits for ([`NO_PATH`]), each path's chain latency, and the rate (0:
-    /// no mixer has published in this run yet).
+    /// [`NOT_ROUTED`] when not played, [`NO_PATH`] when it waits for
+    /// none.  Rate 0 means nothing has published this run.
     applied: [AtomicU32; MAX_PATHS],
     applied_latency: [AtomicU32; MAX_PATHS],
     waits_for: AtomicU8,
@@ -177,8 +158,6 @@ impl DeviceControls {
         controls
     }
 
-    /// Stores the device settings, every path slot's map, level and
-    /// polarity included.
     pub(crate) fn set(&self, settings: &OutputDeviceSettings) {
         let settings = settings.sanitized();
         for (to, from) in self.maps.iter().zip(&settings.path_map) {
@@ -197,7 +176,6 @@ impl DeviceControls {
         self.set_loudness(&settings.loudness);
     }
 
-    /// Stores the loudness target and learned trim, sanitized.
     fn set_loudness(&self, settings: &LoudnessSettings) {
         let settings = settings.sanitized();
         self.loudness_target
@@ -206,7 +184,6 @@ impl DeviceControls {
             .store(settings.trim_db.to_bits(), Ordering::Relaxed);
     }
 
-    /// Reads the loudness target and learned trim.
     pub(crate) fn loudness_settings(&self) -> LoudnessSettings {
         LoudnessSettings {
             target_lufs: f32::from_bits(self.loudness_target.load(Ordering::Relaxed)),
@@ -214,7 +191,6 @@ impl DeviceControls {
         }
     }
 
-    /// Publishes one block's loudness reading.
     pub(crate) fn publish_loudness(&self, reading: LoudnessReading) {
         self.loudness_momentary
             .store(reading.momentary_lufs.to_bits(), Ordering::Relaxed);
@@ -226,7 +202,6 @@ impl DeviceControls {
             .store(reading.trim_db.to_bits(), Ordering::Relaxed);
     }
 
-    /// The latest loudness reading.
     pub(crate) fn loudness(&self) -> LoudnessReading {
         LoudnessReading {
             momentary_lufs: f32::from_bits(self.loudness_momentary.load(Ordering::Relaxed)),
@@ -236,28 +211,23 @@ impl DeviceControls {
         }
     }
 
-    /// Clears the meter's windows and integrated history on the next block.
     pub(crate) fn request_loudness_reset(&self) {
         self.loudness_reset.store(true, Ordering::Relaxed);
     }
 
-    /// Takes a pending reset request.
     pub(crate) fn take_loudness_reset(&self) -> bool {
         self.loudness_reset.swap(false, Ordering::Relaxed)
     }
 
-    /// The identity generation of the device in this slot.
     pub(crate) fn device_generation(&self) -> u64 {
         self.device_generation.load(Ordering::Relaxed)
     }
 
-    /// Marks that a different device now lives in this slot.
     pub(crate) fn note_new_device(&self) {
         self.device_generation.fetch_add(1, Ordering::Relaxed);
         self.stop_learn();
     }
 
-    /// Starts an output Learn.
     pub(crate) fn start_learn(&self) {
         self.learn_active.store(true, Ordering::Relaxed);
         self.learn_generation.fetch_add(1, Ordering::Relaxed);
@@ -275,17 +245,14 @@ impl DeviceControls {
         self.learn_blocks.store(0, Ordering::Relaxed);
     }
 
-    /// Whether an output Learn is running.
     pub(crate) fn learn_active(&self) -> bool {
         self.learn_active.load(Ordering::Relaxed)
     }
 
-    /// The Learn generation, bumped on every start and stop.
     pub(crate) fn learn_generation(&self) -> u64 {
         self.learn_generation.load(Ordering::Relaxed)
     }
 
-    /// Publishes one Learn window's integrated reading and gated block count.
     pub(crate) fn publish_learn(&self, integrated_lufs: f32, blocks: u32) {
         self.learn_integrated
             .store(integrated_lufs.to_bits(), Ordering::Relaxed);
@@ -407,8 +374,6 @@ impl DeviceControls {
         std::array::from_fn(|channel| f32::from_bits(self.meters[channel].load(Ordering::Relaxed)))
     }
 
-    /// Safety-limiter gain reduction in dB.  0 when the device is not
-    /// limiting.
     pub(crate) fn reduction_db(&self) -> f32 {
         f32::from_bits(self.reduction_db.load(Ordering::Relaxed))
     }
@@ -418,9 +383,6 @@ impl DeviceControls {
         self.reduction_db.store(db.to_bits(), Ordering::Relaxed);
     }
 
-    /// The device's real channel count; 0 = unknown (bridge not running),
-    /// so the UI falls back to the device inventory's channel count.  ASIO
-    /// opens at most 4 outputs for now; the map sees that count.
     pub(crate) fn channels(&self) -> u32 {
         self.channels.load(Ordering::Relaxed)
     }
@@ -432,33 +394,26 @@ impl DeviceControls {
             .store(channels.min(u32::MAX as usize) as u32, Ordering::Relaxed);
     }
 
-    /// One path's channel map on this device right now.
     pub(crate) fn path_map(&self, path: usize) -> ChannelMap {
         self.maps[path].load()
     }
 
-    /// One path's signed gain (level and polarity) on this device.
     #[cfg(test)]
     pub(crate) fn path_gain(&self, path: usize) -> f32 {
         self.maps[path].gain()
     }
 
-    /// Path 0's map, the unused mode and the effective gain (0 when muted)
-    /// right now.
     #[cfg(test)]
     pub(super) fn load(&self) -> (ChannelMap, UnusedChannels, f32) {
         let (unused, gain) = self.load_device();
         (self.path_map(0), unused, gain)
     }
 
-    /// The click mask latched for a block.  Bit `n` is channel `n`.
     pub(crate) fn click_mask(&self) -> u8 {
         self.click_mask.load(Ordering::Relaxed)
     }
 
-    /// The unused mode, the level gain and the mute gain (0 or 1) right now.
-    /// Mute is its own ramp so the safety limiter can sit between the level
-    /// and the fade to silence.
+    /// Mute is its own ramp so the limiter sits between level and fade.
     fn load_level_and_mute(&self) -> (UnusedChannels, f32, f32) {
         let unused = if self.silent.load(Ordering::Relaxed) {
             UnusedChannels::Silent
@@ -474,7 +429,6 @@ impl DeviceControls {
         (unused, level, mute)
     }
 
-    /// The unused mode and the effective gain (0 when muted) right now.
     #[cfg(test)]
     fn load_device(&self) -> (UnusedChannels, f32) {
         let (unused, level, mute) = self.load_level_and_mute();
@@ -482,9 +436,8 @@ impl DeviceControls {
     }
 }
 
-/// Slot of the shared value every channel at or past
-/// [`MAX_OUTPUT_CHANNELS`] gets: those channels are never reached, so they
-/// all carry the same unused-channel value.
+/// Channels past [`MAX_OUTPUT_CHANNELS`] share one slot.  A map never
+/// reaches them.
 const EXTRA: usize = MAX_OUTPUT_CHANNELS;
 /// Samples a [`DeviceFrame`] holds: one per mapped channel plus the shared
 /// slot.  A generic extra output's ring carries this many lanes at most.
@@ -496,10 +449,9 @@ pub(crate) fn frame_lanes(channels: usize) -> usize {
     channels.min(SLOTS)
 }
 
-/// One mapped device frame: what each device channel plays, and the same
-/// frame without the metronome tick or the calibration click (what a take
-/// records while "Record the click" is off).  Both share the level, the
-/// music ceiling, the mute and the calibration duck.
+/// Played lanes, and click-free lanes with no tick and no calibration
+/// click.  Both share the level, the music ceiling, the mute and the
+/// duck.
 pub(crate) struct DeviceFrame {
     samples: [f32; SLOTS],
     /// The click-free frame, lane for lane.  Equal to `samples` while no
@@ -520,8 +472,6 @@ impl DeviceFrame {
         }
     }
 
-    /// [`Self::sample`] of the click-free frame: no metronome tick and no
-    /// calibration click.
     #[inline]
     pub(crate) fn record_sample(&self, channel: usize) -> f32 {
         if channel >= self.channels {
@@ -531,12 +481,10 @@ impl DeviceFrame {
         }
     }
 
-    /// This frame with the calibration duck applied and the click added to
-    /// `mapped` (bit `n` = device channel `n`) after the scaling, so the
-    /// measurement keeps its fixed level regardless of the device fader and
-    /// leaves on the channels the clock map really plays.  An empty mask
-    /// falls back to channel 0 (and 1 when the device has it).  The
-    /// click-free frame gets the duck but never the click.
+    /// Duck, then add the click on `mapped`, so its level ignores the
+    /// fader.  An empty mask falls back to channels 0 and 1.  The
+    /// click-free frame is ducked and never gets the click.  Unity is
+    /// returned untouched: `x * 1.0` would clear a negative zero.
     #[inline]
     pub(crate) fn ducked(&self, gain: f32, click: f32, mapped: u32) -> Self {
         let mut frame = Self {
@@ -565,31 +513,25 @@ impl DeviceFrame {
         frame
     }
 
-    /// The frame as lanes, [`frame_lanes`] of them for its channel count;
-    /// lane `n` is channel `n`, the last lane of a device with more than
-    /// [`MAX_OUTPUT_CHANNELS`] channels is the shared slot.
+    /// Lane `n` is channel `n`.  Past [`MAX_OUTPUT_CHANNELS`], the last
+    /// lane is the shared slot.
     #[inline]
     pub(crate) fn lanes(&self) -> &[f32] {
         &self.samples[..frame_lanes(self.channels)]
     }
 
-    /// Rebuilds a frame for a `channels`-channel device from its lanes (see
-    /// [`Self::lanes`]).  Missing lanes read silence.  The click-free frame
-    /// is the same lanes, so whatever click they hold stays in a take.
+    /// The click-free frame is these lanes, so a click in them stays in
+    /// a take.
     #[inline]
     pub(crate) fn from_lanes(lanes: &[f32], channels: usize) -> Self {
         Self::from_both_lanes(lanes, lanes, channels)
     }
 
-    /// The click-free frame as lanes, laid out like [`Self::lanes`].
     #[inline]
     pub(crate) fn record_lanes(&self) -> &[f32] {
         &self.record[..frame_lanes(self.channels)]
     }
 
-    /// Rebuilds a frame from its lanes and its click-free lanes (see
-    /// [`Self::lanes`] and [`Self::record_lanes`]).  Missing lanes read
-    /// silence.
     #[inline]
     pub(crate) fn from_both_lanes(lanes: &[f32], record: &[f32], channels: usize) -> Self {
         let count = frame_lanes(channels);
@@ -607,35 +549,10 @@ impl DeviceFrame {
     }
 }
 
-/// Applies a device's channel map, level and mute to the finished stereo
-/// mix, one frame at a time, for whatever buffer layout the backend has.
-/// Sized for its channel count when the stream opens; fixed arrays, so the
-/// callback never allocates.
-///
-/// Per block: [`Self::begin_paths`] reads the controls once and points the
-/// ramps at them, [`Self::map_paths`] runs per frame, [`Self::end_block`] publishes
-/// the meters.  Every weight, each path's gain on the device and the device
-/// gain move over the same ramp as the mixer's routes, so a map, level,
-/// polarity or mute change crossfades.  Settled
-/// weights are exactly 0 or 1 and the gain exactly its target, so the
-/// default settings write the very samples the output always wrote, while
-/// the sample stays under the safety ceiling.  The ceiling runs after the
-/// level and before the mute ramp.  The metronome is added after that
-/// ceiling and before the mute, on the click mask, and a zero sample
-/// does not write a lane.  The lanes it touched then pass through their
-/// own limiter, so the sum is gained down instead of flat-topped, and a
-/// channel the click missed is left alone.  That limiter keeps running on
-/// the masked lanes between ticks, so its release after a click is a ramp,
-/// not a step back to unity; once it is back at unity a zero tick skips
-/// it.  A mask change while it still reduces keeps it on the old lanes
-/// too until a block starts with it back at unity, so no lane steps out
-/// of its gain.  A lane the tick just moved to takes the gain at once, and
-/// a dropped lane stays ducked by later ticks until the limiter gets back
-/// to unity between them.  [`Self::map_paths`] delays the tick by the
-/// alignment delay a dry, untrimmed path gets on the device first, and the
-/// calibration duck ([`Self::duck_click`]) acts after that delay, on ticks already queued.
-/// The frame's click-free lanes are copied after the music ceiling, before
-/// the tick and its limiter, and get the same mute.
+/// No allocation.  Unity copies.  The tick is after the ceiling; the
+/// click-free lanes are copied before it.  A mask change keeps the
+/// click limiter on the old lanes until it releases, so no lane steps
+/// out of its gain.
 pub(crate) struct DeviceMapper {
     channels: usize,
     /// Weights of `[L, R, (L + R) / 2]` per path slot and channel slot.
@@ -669,31 +586,20 @@ pub(crate) struct DeviceMapper {
     /// Click mask for this block (bit `n` = channel `n`).  Not the path map:
     /// 0 adds the tick nowhere.
     click_mask: u8,
-    /// Lanes the click limiter runs on: [`Self::click_mask`], plus the
-    /// lanes of an earlier mask while the limiter has not released to
-    /// unity since that mask changed.  Collapses to the mask at the first
-    /// block that starts with the limiter at unity.
+    /// The mask, plus lanes of an older mask until the limiter
+    /// releases, so a dropped lane does not step out of its gain.
     click_lanes: u8,
-    /// The metronome samples this mapper was handed, newest last, so the
-    /// tick can wait the device's alignment delay like the music does.
-    /// Preallocated for [`MAX_ALIGN_DELAY`] samples.
+    /// So the tick can wait the device's alignment delay.
     click_line: MonoDelayLine,
-    /// Reads [`Self::click_line`] at the delay a dry, untrimmed path gets
-    /// here.  A change crossfades like a path's tap while ticks are
-    /// queued, and moves at once while the line is silent.
+    /// A change crossfades while ticks are queued, and snaps while the
+    /// line is silent.
     click_tap: DelayTap,
-    /// Zero ticks pushed since the last non-zero one.  Once that is past
-    /// everything the tap reads, the line is reset and no longer written
-    /// or read until a tick arrives.
+    /// Once this passes every read, the line is reset and skipped.
     click_quiet: usize,
-    /// Whether [`Self::map_paths`] ran since the last block began, or that
-    /// block had no frames.  A block with frames that did not map this
-    /// device left its click line behind, so the next block resets it
-    /// instead of playing those ticks late.
+    /// A block with frames that did not map this device left stale
+    /// ticks, so the next block resets the line.
     click_mapped: bool,
-    /// The calibration duck on the tick, after the click line.  0 while a
-    /// measurement ducks the output, so ticks already queued are silenced
-    /// with the ones not yet generated.
+    /// After the click line, so a tick already waiting is ducked too.
     click_duck: Ramp,
     /// The learned output trim, applied before the device level fader and
     /// the ceiling.  Unity copies.
@@ -706,9 +612,7 @@ pub(crate) struct DeviceMapper {
     learn_meter: LoudnessMeter,
     rate: u32,
     block_frames: usize,
-    /// [`DeviceControls::device_generation`] as last seen.
     device_generation: u64,
-    /// [`DeviceControls::learn_generation`] as last seen.
     learn_generation: u64,
     learn_active: bool,
     frame: DeviceFrame,
@@ -756,9 +660,8 @@ impl DeviceMapper {
         }
     }
 
-    /// Follows a device whose channel count changed (a generic extra output's
-    /// stream reopened on another device).  Fixed storage, so this is safe
-    /// in the callback; the next block adopts the controls outright.
+    /// Fixed storage, so this is safe on the callback.  The next block
+    /// adopts the controls.
     pub(crate) fn set_channels(&mut self, channels: usize) {
         if channels != self.channels {
             self.channels = channels;
@@ -771,15 +674,12 @@ impl DeviceMapper {
         }
     }
 
-    /// Channel slots this device uses: one per channel up to the maximum,
-    /// plus the shared slot when it has more.
     fn slots(&self) -> std::iter::Chain<std::ops::Range<usize>, std::option::IntoIter<usize>> {
         let mapped = self.channels.min(MAX_OUTPUT_CHANNELS);
         let extra = (self.channels > MAX_OUTPUT_CHANNELS).then_some(EXTRA);
         (0..mapped).chain(extra)
     }
 
-    /// Path 0 alone, as every caller before paths existed.
     #[cfg(test)]
     pub(crate) fn begin_block(&mut self, controls: &DeviceControls, ramp_samples: f32) {
         self.begin_paths(
@@ -791,13 +691,8 @@ impl DeviceMapper {
         );
     }
 
-    /// Reads the controls for this block, for the `live` path slots.  The
-    /// first block (and a path that just went live) adopts them directly;
-    /// later changes take `ramp_samples` samples.  Also works out each
-    /// path's alignment delay on this device from `timing`, points the taps
-    /// at it (see [`plan_alignment`]) and publishes it for the UI.
-    /// `frames` is the block's length: a block of 0 frames maps nothing and
-    /// keeps the queued ticks.
+    /// The first block, and a path that just went live, snaps.  A block
+    /// of 0 frames maps nothing and keeps the queued ticks.
     pub(crate) fn begin_paths(
         &mut self,
         controls: &DeviceControls,
@@ -897,13 +792,9 @@ impl DeviceMapper {
         self.peaks = [0.0; MAX_OUTPUT_CHANNELS];
     }
 
-    /// Points the calibration duck on the tick at silence while `ducking`,
-    /// and back at unity after; the move takes `ramp_samples`.  It applies
-    /// after the click line, so a tick queued before the measurement does
-    /// not play into it.  While the line is silent nothing is sounding or
-    /// queued here, so the duck moves at once: a tick that starts in this
-    /// block is already ducked.  Call it once per block, after
-    /// [`Self::begin_paths`].
+    /// After the click line, so a queued tick does not play into a
+    /// measurement.  A silent line snaps, so a tick that starts this
+    /// block is already ducked.
     pub(crate) fn duck_click(&mut self, ducking: bool, ramp_samples: f32) {
         let target = if ducking { 0.0 } else { 1.0 };
         if self.click_line_silent() {
@@ -913,10 +804,7 @@ impl DeviceMapper {
         }
     }
 
-    /// Forgets every queued tick.  O(1); the line then reads silence and is
-    /// skipped until the next non-zero tick.  The mixer calls it for a
-    /// extra output slot that is not live, so one that comes back does not
-    /// replay what it held.
+    /// A slot that comes back must not replay ticks it queued before.
     pub(crate) fn silence_click_line(&mut self) {
         self.click_line.reset();
         self.click_quiet = usize::MAX;
@@ -928,11 +816,8 @@ impl DeviceMapper {
         self.click_quiet > self.click_tap.longest() as usize
     }
 
-    /// The tick this frame, after the device's alignment delay and the
-    /// calibration duck.  While the line holds only zeros, a zero tick is
-    /// neither written nor read, and the tap moves straight to its target:
-    /// there is nothing to crossfade, and a fade left pending would read
-    /// the next tick at two positions.
+    /// While the line is silent the tap snaps: a pending crossfade
+    /// would read the next tick at two positions.
     #[inline]
     fn delayed_click(&mut self, click: f32) -> f32 {
         let duck = self.click_duck.next();
@@ -952,9 +837,7 @@ impl DeviceMapper {
         self.click_line.push(click);
         let delayed = self.click_tap.next_mono(&self.click_line, 0);
         if self.click_line_silent() {
-            // The last tick has come out of every read position.  Anything
-            // older reads silence after this too, so a longer delay later
-            // cannot replay it.
+            // Anything older would replay if a later delay is longer.
             self.silence_click_line();
         }
         if delayed == 0.0 || duck == 1.0 {
@@ -964,9 +847,7 @@ impl DeviceMapper {
         }
     }
 
-    /// Points each path's tap at its alignment delay on this device.  A
-    /// path the device keeps playing crossfades to a new delay; one that
-    /// starts playing here (and every path in the first block) snaps.
+    /// A path that starts playing here snaps; one that stays crossfades.
     fn align_paths(
         &mut self,
         controls: &DeviceControls,
@@ -990,9 +871,7 @@ impl DeviceMapper {
                 self.taps[path].snap(delay);
             }
         }
-        // The tick has no chain latency and no trim, so it waits as long as
-        // a dry, untrimmed path would here: it lands with the aligned music,
-        // and trimming one path does not move it.
+        // No chain latency and no trim, so a path trim does not move it.
         let click_delay = plan.dry;
         if self.adopted {
             self.click_tap.set_target(click_delay, fade);
@@ -1003,7 +882,6 @@ impl DeviceMapper {
         controls.publish_alignment(&plan, &timing.latency, timing.rate);
     }
 
-    /// Path 0 alone: maps one stereo frame with path 0's map.
     #[cfg(test)]
     pub(crate) fn map(&mut self, left: f32, right: f32) -> &DeviceFrame {
         let mut frames = [[0.0; 2]; MAX_PATHS];
@@ -1011,13 +889,7 @@ impl DeviceMapper {
         self.map_frames(&frames, 0.0)
     }
 
-    /// Maps the current frame of every live path onto the device's
-    /// channels: each path is read from its delay line through this
-    /// device's tap (its alignment delay here), then mapped and summed as
-    /// in [`Self::map_frames`].  A settled tap at delay 0 reads the frame
-    /// just written, so an unaligned path is exactly its own frame.  The
-    /// metronome sample `click` waits the delay a dry, untrimmed path gets
-    /// on this device, so it lines up with the aligned music.  Call it
+    /// A settled tap at delay 0 reads the frame just written.  Call
     /// once per frame: each call writes the click line.
     #[inline]
     pub(crate) fn map_paths(&mut self, lines: &PathLines, click: f32) -> &DeviceFrame {
@@ -1030,16 +902,8 @@ impl DeviceMapper {
         self.map_frames(&frames, click)
     }
 
-    /// Maps one frame of every live path (each after the master and its
-    /// alignment) onto the device's channels, scaled by the path's level
-    /// and polarity on this device, and sums them per channel: this is the
-    /// sum of the paths.  Slots that are not live are ignored.  One live
-    /// path at 0 dB and normal polarity gives exactly its own mapped frame.
-    /// `click` is the metronome sample.  It is added after the ceiling and
-    /// before the mute, and only when it is not exactly 0.  The masked
-    /// lanes pass the click limiter on every frame while it still reduces,
-    /// tick or not, so a reduction a tick left behind releases smoothly.
-    /// A zero tick with that limiter at unity skips it: it would only copy.
+    /// The tick is added after the ceiling, and only when it is not 0.
+    /// A zero tick still runs the click limiter while it is releasing.
     #[inline]
     pub(crate) fn map_frames(
         &mut self,
@@ -1061,9 +925,8 @@ impl DeviceMapper {
         }
         let gain = self.gain.next();
         let trim = self.trim.next();
-        // Unity copies, so 0 dB and a settled trim never touch a sample in
-        // any FP mode.  The learned trim sits before the fader; Learn and
-        // Match measure here, so moving the fader never changes them.
+        // Unity copies, in any FP mode.  Learn and Match measure here,
+        // so the fader does not move them.
         let learned = |value: f32| if trim == 1.0 { value } else { value * trim };
         let level = |value: f32| {
             let value = learned(value);
@@ -1084,21 +947,11 @@ impl DeviceMapper {
             let sum = sum_paths(&mut self.weights, self.live, EXTRA, &sources);
             self.frame.samples[EXTRA] = level(sum);
         }
-        // Level, then the safety ceiling, then the metronome, then mute.
-        // Mute already ramps to silence, so the music limiter sees the
-        // music the fader would play.  The tick is not part of that gain:
-        // a hot tick on one lane must not duck the others.  It is added
-        // after the ceiling, and only those lanes pass through a second
-        // limiter, so music that shares a lane is gained down instead of
-        // flattened and the reduction is published.  A zero sample is not
-        // added (`x + 0.0` would clear a negative zero).  The masked lanes
-        // go through that limiter even without a tick while it is still
-        // releasing: skipping it then would put the music back at unity in
-        // one sample.  Released, with no tick, it would only copy (the music
-        // limiter already holds those lanes under the same ceiling), so the
-        // gather is skipped.  Lanes a mask change just dropped stay in it
-        // until it is back at unity; the tick goes on the mask only.  The
-        // click-free lanes are copied before the tick and get only the mute.
+        // Ceiling, then the tick on its own limiter, then mute.  A zero
+        // tick is not added (`x + 0.0` clears a negative zero).  The
+        // click limiter keeps running while it releases, or the music
+        // would return to unity in one sample.  Click-free lanes are
+        // copied before the tick and get only the mute.
         let lanes = frame_lanes(self.channels);
         self.limiter.process(&mut self.frame.samples[..lanes]);
         self.frame.record[..lanes].copy_from_slice(&self.frame.samples[..lanes]);
@@ -1140,10 +993,7 @@ impl DeviceMapper {
         if self.learn_active {
             self.learn_meter.push(&learn_frame[..mapped]);
         }
-        // Loudness sees the click-free lanes after their mute, so the
-        // metronome never moves the reading.  A device with more than
-        // MAX_OUTPUT_CHANNELS channels keeps one shared lane past the
-        // mapped ones; the meter counts the real channels only.
+        // Click-free, so the metronome never moves the reading.
         self.loudness.push(&self.frame.record[..mapped]);
         for channel in 0..mapped {
             let value = self.frame.samples[channel].abs();
@@ -1177,9 +1027,7 @@ impl DeviceMapper {
         self.learn_meter.reset();
     }
 
-    /// Publishes this block's per-channel peaks, loudness and any Learn
-    /// reading.  Nothing moves on its own; the learned trim only ramps
-    /// when its setting changes.
+    /// The learned trim only moves when its setting changes.
     pub(crate) fn end_block(&mut self, controls: &DeviceControls) {
         if controls.take_loudness_reset() {
             self.reset_loudness();
@@ -1201,9 +1049,7 @@ impl DeviceMapper {
     }
 }
 
-/// One channel slot summed over the live paths.  The sum starts from the
-/// first path's value itself, so one path passes bit for bit; no live path
-/// is silence (+0).
+/// Starts from the first path, so one path passes bit for bit.
 #[inline]
 fn sum_paths(
     weights: &mut [[[Ramp; 3]; SLOTS]; MAX_PATHS],
@@ -1219,9 +1065,7 @@ fn sum_paths(
     value.unwrap_or(0.0)
 }
 
-/// Advances one slot's three weight ramps and mixes the sources with them.
-/// Zero weights are skipped and a weight of 1 copies, so a settled slot
-/// returns its one source bit for bit (and silence as +0).
+/// A weight of 1 copies.  Silence is +0.
 #[inline]
 fn blend(weights: &mut [Ramp; 3], sources: [f32; 3]) -> f32 {
     let mut value: Option<f32> = None;
@@ -1240,9 +1084,7 @@ fn blend(weights: &mut [Ramp; 3], sources: [f32; 3]) -> f32 {
 }
 
 #[cfg(test)]
-/// The output's write rule before device maps existed (cpal
-/// `write_frame`): L and R on channels 1 and 2, their average on the
-/// rest and on a mono device.  The default map must match it bit for bit.
+/// The default map must match this bit for bit.
 pub(crate) fn old_write_frame(frame: &mut [f32], left: f32, right: f32) {
     let rest = (left + right) * 0.5;
     match frame.len() {

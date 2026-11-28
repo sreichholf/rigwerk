@@ -1,13 +1,5 @@
-//! The issues drawer: the list inside the right-hand drawer.  The shell
-//! paints the drawer and the word Issues.  One row per problem from
-//! `RigWerkApp::issue_view` (the last tick's issues): severity, title, one
-//! line of detail, where it is, the action button, *Show* and *Dismiss*
-//! for a warning that allows it.
-//!
-//! Only draws.  The filter and the dismissals live in `app::issues`; a
-//! click here calls those after the frame.  *Show* closes the drawer and
-//! selects the row's anchor.  A new error sets the banner in
-//! `RigWerkApp::tick_issues`, not here.
+//! The issues list.  It only draws; a click calls `app::issues` after the
+//! frame.  *Show* closes the drawer and selects the row's anchor.
 
 use eframe::egui;
 use egui::{Align, Color32, CornerRadius, Layout, RichText, Stroke};
@@ -18,7 +10,6 @@ use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, TypeRole};
 use crate::ui::widgets::row_info;
 
-/// What a click in the list asks for, run once the frame is drawn.
 enum RowClick {
     Filter(IssueFilter),
     Restore,
@@ -42,7 +33,6 @@ fn severity_word(severity: IssueSeverity) -> &'static str {
     }
 }
 
-/// The colour a filter button uses while it is chosen.
 fn filter_color(ui: &egui::Ui, filter: IssueFilter) -> Color32 {
     let colours = palette(ui.ctx());
     match filter {
@@ -98,9 +88,6 @@ fn quiet_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
 }
 
 impl RigWerkApp {
-    /// The list, when there are issues or dismissed ones.  Clicks run
-    /// after drawing.  `width` is the drawer's outer width; the shell has
-    /// already inset the row.
     pub(crate) fn issues_strip(&mut self, ui: &mut egui::Ui, _width: f32) {
         let view = self.issue_view();
         if view.is_empty() {
@@ -196,7 +183,6 @@ impl RigWerkApp {
     }
 }
 
-/// One issue.  Returns the click on one of its buttons.
 fn issue_row(ui: &mut egui::Ui, issue: &LiveIssue) -> Option<RowClick> {
     let colours = palette(ui.ctx());
     let mut click = None;

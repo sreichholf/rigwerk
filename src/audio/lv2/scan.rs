@@ -1,22 +1,15 @@
-//! LV2 bundle discovery and the RDF a bundle declares.
+//! Bundle discovery from Turtle.  Nothing here loads a binary.
 //!
-//! Nothing here loads a plugin binary.  A bundle is a folder whose name ends
-//! in `.lv2` directly under a root; its `manifest.ttl` names the plugins and
-//! links the files that describe them.  A plugin is listed when it has an
-//! audio input and an audio output, and only when its `lv2:binary` exists
-//! with this platform's extension, so a bundle built for another system is
-//! left out as the VST3 scan leaves out one without a loadable binary.  An
-//! `lv2:isSideChain` port is not a main input or output: it neither lists a
-//! plugin nor counts as a channel.
+//! A bundle is a `.lv2` folder directly under a root.  A plugin is listed
+//! only with an audio input, an audio output, and an `lv2:binary` this
+//! platform can open.  An `lv2:isSideChain` port neither lists a plugin nor
+//! counts as a channel.
 //!
-//! The `lv2:EffectPlugin` class never decides what is listed.  A plugin that
-//! needs something RigWerk does not supply is still listed, with `scan_error`
-//! saying what is missing; only the class joins the category line.  That
-//! error is the loader's own: `PortTable::check` runs every rule the loader
-//! reads from the Turtle (features, options, a default state to load, and
-//! every port), and the binary is the one `module::native_binary` would
-//! pick, so the scan and the loader refuse the same plugins.  Only what the
-//! binary itself does is left to the load.
+//! `lv2:EffectPlugin` never decides the list; only the class joins the
+//! category line.  A plugin that needs something this host does not supply
+//! is still listed, with `scan_error`.  That error is `PortTable::check`,
+//! and the binary is the one `module::native_binary` would pick, so the
+//! scan and the loader refuse the same plugins.
 
 use std::path::{Path, PathBuf};
 
@@ -36,8 +29,7 @@ const DOAP_NAME: &str = "http://usefulinc.com/ns/doap#name";
 const DOAP_MAINTAINER: &str = "http://usefulinc.com/ns/doap#maintainer";
 const FOAF_NAME: &str = "http://xmlns.com/foaf/0.1/name";
 
-/// The binary extension this build can open.  A bundle that only ships
-/// another platform's binary is left out, not listed with an error.
+/// A bundle that only ships another platform's binary is left out.
 #[cfg(target_os = "windows")]
 pub(super) const PLATFORM_BINARY_EXTENSION: &str = "dll";
 #[cfg(not(target_os = "windows"))]
@@ -46,21 +38,19 @@ pub(super) const PLATFORM_BINARY_EXTENSION: &str = "so";
 /// One discovered LV2 effect.
 #[derive(Clone, Debug)]
 pub(crate) struct Lv2Candidate {
-    /// The bundle folder, which is what the loader opens.
+    /// The bundle folder the loader opens.
     pub(crate) path: PathBuf,
     pub(crate) plugin_uri: String,
     pub(crate) name: String,
     pub(crate) vendor: String,
     pub(crate) category: String,
-    /// The number of main (not side-chain) audio inputs when that is 1 or 2.
+    /// Main audio inputs, when that count is 1 or 2.  Side chains are out.
     pub(crate) channels: Option<u32>,
-    /// Why the scan expects the load to fail, when it does.  The row is
-    /// still listed so the browser can say what is missing.
+    /// Why the load is expected to fail.  The row stays listed.
     pub(crate) scan_error: Option<String>,
 }
 
-/// The LV2 folders a scan reads.  `LV2_PATH` replaces the defaults, as the
-/// convention says; `RIGWERK_LV2_PATH` is always appended.
+/// `LV2_PATH` replaces the defaults; `RIGWERK_LV2_PATH` is always appended.
 pub(crate) fn scan_roots() -> Vec<PathBuf> {
     roots_from(
         std::env::var_os("LV2_PATH").as_deref(),
@@ -69,8 +59,6 @@ pub(crate) fn scan_roots() -> Vec<PathBuf> {
     )
 }
 
-/// The roots a scan reads, from the two environment values and the platform
-/// defaults, with duplicates dropped in the order they were named.
 pub(super) fn roots_from(
     lv2_path: Option<&std::ffi::OsStr>,
     rigwerk_path: Option<&std::ffi::OsStr>,
@@ -141,7 +129,6 @@ fn multiarch_root() -> Option<PathBuf> {
     root.is_dir().then_some(root)
 }
 
-/// Every bundle directly under every root, sorted by name.
 pub(crate) fn scan_library() -> Vec<Lv2Candidate> {
     let mut bundles = Vec::new();
     for root in scan_roots() {
@@ -177,10 +164,8 @@ pub(crate) fn scan_library() -> Vec<Lv2Candidate> {
     found
 }
 
-/// Parses a bundle's `manifest.ttl` and every `rdfs:seeAlso` file its plugins
-/// name, in file order, and returns the store with the plugin the manifest
-/// declares.  The loader and the scan share this so a plugin's description
-/// is assembled the same way in both.
+/// The loader and the scan share this, so a plugin's description is
+/// assembled the same way in both.
 pub(super) fn read_bundle(bundle: &Path) -> Result<(TtlStore, Vec<String>), String> {
     let manifest = bundle.join("manifest.ttl");
     let mut store = TtlStore::new();
@@ -203,9 +188,8 @@ pub(super) fn read_bundle(bundle: &Path) -> Result<(TtlStore, Vec<String>), Stri
     Ok((store, plugins))
 }
 
-/// The effects one bundle lists.  A file the manifest needs but cannot read
-/// is an error for the whole bundle, so the caller logs one line and skips
-/// it; a `rdfs:seeAlso` that is not a file URI is ignored.
+/// A file the manifest needs but cannot read fails the whole bundle.  A
+/// `rdfs:seeAlso` that is not a file URI is ignored.
 pub(crate) fn scan_bundle(bundle: &Path) -> Result<Vec<Lv2Candidate>, String> {
     let (store, plugins) = read_bundle(bundle)?;
     let mut found: Vec<Lv2Candidate> = plugins
@@ -257,9 +241,7 @@ fn candidate(
     })
 }
 
-/// One `lv2:port` as the scan reads it to decide whether a plugin is an
-/// effect.  Whether the loader can connect it is `PortTable::check`'s
-/// business, not this one's.
+/// Whether the loader can connect a port is `PortTable::check`, not this.
 struct Port {
     input: bool,
     output: bool,
@@ -268,7 +250,6 @@ struct Port {
 }
 
 impl Port {
-    /// An audio port of the main signal chain, not a side chain.
     fn is_main(&self) -> bool {
         self.audio && !self.side_chain
     }
@@ -301,9 +282,6 @@ fn vendor(store: &TtlStore, plugin: &str) -> String {
         .unwrap_or_else(|| local_name(maintainer.trim_end_matches('/')).to_owned())
 }
 
-/// The plugin's classes, without `lv2:Plugin`, as their shortened local
-/// names.  A `lv2:DelayPlugin` reads "Delay"; with no class it is an
-/// "LV2 effect".
 fn category(store: &TtlStore, plugin: &str) -> String {
     let classes: Vec<String> = store
         .types(plugin)

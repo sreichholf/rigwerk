@@ -1,42 +1,26 @@
-//! The UI-thread half of a loaded LV2 plugin, and its load sequence.
+//! UI-thread half of a loaded LV2 plugin.
 //!
-//! [`Lv2Instance`] lives behind the plugin's UI-only lock (`PluginHandle`):
-//! the port ranges, the current values, latency and the activation state.
-//! It implements [`PluginHostUi`], so the shared handle reaches its
-//! parameters, state and service without naming LV2.  The audio-thread half is
-//! `processor.rs`.  Both point into one [`Lv2Core`],
-//! which owns the instance handle, its descriptor, the library it came from
-//! and the feature set the plugin was instantiated with.  The last of the two
-//! halves to go runs `deactivate` (only if `activate` actually ran) and
-//! `cleanup`, and only then unloads the library.
+//! [`Lv2Instance`] is behind the UI-only lock.  Both halves point into one
+//! [`Lv2Core`].  The last half to go runs `deactivate` (only if `activate`
+//! ran) and `cleanup`, then unloads the library.
 //!
-//! LV2 splits its C API by threading class.  `instantiate`, `activate`,
-//! `deactivate`, `cleanup` and `state.restore` are instantiation-class calls:
-//! they run on the UI thread, never while a block is inside `run`.
-//! `connect_port`, `run` and the worker's `work_response`/`end_run` are
-//! audio-class: `connect_port` is done here at load, before the processor is
-//! handed to a slot and before any `run` can have started; `run` is the
-//! processor's, and the load's `run(handle, 0)` delivers worker responses
-//! first.  `state.save` is a UI call that may overlap `run`, so a capture
-//! needs no pause.  Requests a restore queued are run on this thread, before
-//! `activate`, because the instance is not registered yet and no audio thread
-//! is inside `run`.  After that, the worker's `work` is called on the
-//! process-wide worker thread (`worker.rs`) only once this load has
-//! registered the instance, and the core unregisters it before
-//! `deactivate`/`cleanup`, so no `work` can reach a plugin that is being torn
-//! down.  Unregistering serves the requests still queued and delivers the
-//! responses still queued through `work_response`, as `worker.h` requires;
-//! the processor is gone by then, so no `run` is inside.  There is no
-//! restart: LV2 has no call that asks for one, and a new sample rate loads a
+//! Instantiation-class calls (`instantiate`, `activate`, `deactivate`,
+//! `cleanup`, `state.restore`) run on the UI thread, never while a block is
+//! inside `run`.  `connect_port` runs here at load, before any `run`.
+//! `state.save` may overlap `run`, so a capture needs no pause.  A restore's
+//! worker requests run on this thread, before `activate`, because the
+//! instance is not registered yet.  After registration, `work` runs only on
+//! the worker thread; the core unregisters before `deactivate`/`cleanup`.
+//! Unregistering serves queued requests and delivers responses through
+//! `work_response`, as `worker.h` requires, with the processor already gone.
+//! There is no restart: LV2 has no such call, and a new sample rate loads a
 //! new instance.
 //!
-//! The instance's values are native per range.  Restored values are written
-//! straight into the control buffers before activation, so the plugin sees
-//! them from its first block and the panel shows them; the `run(handle, 0)`
-//! after activation delivers the responses that restore's `work` queued,
-//! then updates the control outputs and the latency report without processing
-//! audio.  The worker is registered after that run.  A request `run(0)`
-//! schedules stays queued for the worker thread; it is not run inline.
+//! Restored values are written into the control buffers before activation.
+//! `run(handle, 0)` after that delivers responses restore's `work` queued,
+//! then updates control outputs, without processing audio.  The worker is
+//! registered after that run.  A request `run(0)` schedules stays queued;
+//! it is not run inline.
 
 use std::ffi::{c_char, c_void, CString};
 use std::path::Path;
@@ -64,38 +48,31 @@ use super::scan;
 use super::state;
 use super::worker::{self, WorkerInstance, WorkerRings};
 
-/// What both halves of one plugin point into.  Fields drop in declaration
-/// order, which is the teardown order LV2 needs: the plugin is deactivated
-/// and cleaned up in `Drop`, then the features, the rings, the bundle path
-/// and the port buffers it was connected to go, and only then the module
-/// (which unloads the library if this was its last user).
+/// Fields drop in declaration order: `Drop` deactivates and cleans up,
+/// then the features, rings, bundle path and retired buffers, and only then
+/// the module unloads the library.
 pub(super) struct Lv2Core {
     pub(super) handle: LV2_Handle,
     pub(super) descriptor: *const LV2_Descriptor,
-    /// The feature array the plugin was instantiated with.  Boxed before the
-    /// pointers were taken, so a moved handle never moves it.
+    /// Boxed before the pointers were taken, so a moved handle never moves it.
     pub(super) _features: Box<HostFeatures>,
-    /// The instance's worker rings; the schedule feature points at them.
+    /// The schedule feature points at them.
     pub(super) _rings: Arc<WorkerRings>,
-    /// The bundle path `instantiate` was given.  A plugin may keep the
-    /// pointer, so it lives until after `cleanup`, as lilv keeps it.
+    /// A plugin may keep the pointer until after `cleanup`, as lilv does.
     pub(super) _bundle_path: CString,
-    /// The port buffers, once the processor that owned them is gone.  The
-    /// plugin still points into them, and the instance may keep the core
-    /// for longer, so the processor hands them here and they are freed only
-    /// after `cleanup`.
+    /// Port buffers after the processor drops them.  The plugin still points
+    /// in, so they are freed only after `cleanup`.
     pub(super) retired: OnceLock<PortBuffers>,
-    /// The instance as the worker thread knows it, once the load registered
-    /// it.  Empty for a plugin without `worker:interface` and for the test
-    /// fakes.  Dropped after `Drop::drop` unregistered it.
+    /// Empty without `worker:interface`, and for test fakes.  Dropped after
+    /// unregister.
     pub(super) worker: OnceLock<Arc<WorkerInstance>>,
-    /// Whether processing is allowed: the load's `activate` has run (or none
-    /// was needed).  The processor reads this.
+    /// The load's `activate` has run, or none was needed.  The processor
+    /// reads this.
     pub(super) active: AtomicBool,
-    /// Whether `activate` was actually called, so `deactivate` may be called.
-    /// A plugin without an `activate` function is active without this.
+    /// `activate` was called, so `deactivate` may be.  A plugin without
+    /// `activate` is active without this.
     pub(super) activated: AtomicBool,
-    /// The latency port's last value, as `f32` bits.
+    /// As `f32` bits.
     pub(super) latency_raw: AtomicU32,
     /// The latency port moved since the UI last read it.
     pub(super) latency_changed: AtomicBool,
@@ -142,7 +119,6 @@ impl Drop for Lv2Core {
 
 #[cfg(test)]
 impl Lv2Core {
-    /// A core with no plugin behind it, for the processor tests.
     pub(super) fn for_test(active: bool) -> Self {
         Self {
             handle: std::ptr::null_mut(),
@@ -161,25 +137,23 @@ impl Lv2Core {
     }
 }
 
-/// The UI half.
 pub(crate) struct Lv2Instance {
-    /// The control ranges in the processor's table order.
+    /// The processor's table order.
     pub(super) ranges: Arc<[Lv2Range]>,
-    /// One native value per range, as the panel and the plugin last agreed.
+    /// Native, one per range.  What the panel and the plugin last agreed.
     pub(super) values: Vec<f32>,
     pub(super) shared: Arc<PluginShared>,
-    /// The plugin's state extension, valid for as long as the instance (the
-    /// descriptor promises that).  Null when the plugin has none.
+    /// Valid for the instance's life (the descriptor promises that).  Null
+    /// when the plugin has none.
     state: *const LV2_State_Interface,
-    /// The worker interface's `work_response`, when it has one.  The load's
-    /// zero-frame run delivers queued responses through it before `run`.
+    /// The load's zero-frame run delivers queued responses through it
+    /// before `run`.
     worker_response:
         Option<unsafe extern "C" fn(LV2_Handle, u32, *const c_void) -> LV2_Worker_Status>,
-    /// The worker interface's `end_run`, when it has one.  Every `run` must
-    /// be followed by it, including the load's zero-frame run, which does
-    /// not go through the processor.
+    /// Every `run` must be followed by it, including the load's zero-frame
+    /// run, which does not go through the processor.
     worker_end_run: Option<unsafe extern "C" fn(LV2_Handle) -> LV2_Worker_Status>,
-    /// Last: the handle outlives everything above that points into it.
+    /// Last: outlives everything above that points into it.
     pub(super) core: Arc<Lv2Core>,
 }
 
@@ -190,8 +164,6 @@ pub(crate) struct Lv2Instance {
 // thread at a time.
 unsafe impl Send for Lv2Instance {}
 
-/// What a load hands to `LoadedPlugin`: the two halves and the UI side's
-/// parts of the parameter transfers.  Mirrors [`super::super::clap::ClapLoaded`].
 pub(crate) struct Lv2Loaded {
     pub(crate) instance: Lv2Instance,
     pub(crate) processor: super::processor::Lv2Processor,
@@ -200,16 +172,14 @@ pub(crate) struct Lv2Loaded {
     pub(crate) ids: Arc<ParamIds>,
     pub(crate) views: Vec<PluginParamView>,
     pub(crate) has_editor: bool,
-    /// The saved state restored and no newer value had to go on top.
+    /// The saved blob restored, and no newer value had to go on top.
     pub(crate) state_current: bool,
-    /// The ids of the restored values still queued for the processor.
+    /// Restored value ids still queued for the processor.
     pub(crate) undelivered: Vec<u32>,
 }
 
 impl Lv2Instance {
-    /// Parses the bundle, opens its binary and loads one plugin from it, in
-    /// the order the LV2 headers require.  UI thread.  Nothing is processed
-    /// here: the processor starts with the first audio block.
+    /// UI thread.  The processor starts with the first audio block.
     pub(crate) fn load(
         bundle: &Path,
         plugin_uri: &str,
@@ -248,17 +218,11 @@ impl Lv2Instance {
         )
     }
 
-    /// The load from a resolved descriptor on: instantiate, connect, restore,
-    /// the worker requests that restore queued, activate, the zero-frame run
-    /// and the worker registration.  UI thread.  `module`
-    /// keeps the descriptor's library loaded; `None` only for the fake
-    /// descriptors the tests build without a binary.  The descriptor itself
-    /// must outlive the loaded instance: its `Drop` calls `deactivate` and
-    /// `cleanup` through the pointer, and `run` is read from it for every
-    /// block, so a fake must live at least as long as the instance, not
-    /// merely as long as this call.  `default_state` is the
-    /// bundle's `state:state` for a plugin that asks for it, restored when no
-    /// saved blob was.
+    /// UI thread.  `module` is `None` only for test fakes.  The descriptor
+    /// must outlive the instance: `Drop` calls `deactivate` and `cleanup`
+    /// through the pointer, and `run` is read from it every block.  A fake
+    /// must live as long as the instance, not merely this call.
+    /// `default_state` is restored when no saved blob was.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn load_descriptor(
         bundle: &Path,
@@ -307,7 +271,7 @@ impl Lv2Instance {
         if handle.is_null() {
             return Err("The LV2 plugin could not be instantiated.".to_owned());
         }
-        // The extension is per plugin, valid for the instance's lifetime.
+        // Valid for the instance's lifetime.
         // SAFETY: `descriptor` points into the module the core keeps loaded,
         // and the URI is the null-terminated one the header names.
         let state_interface = unsafe {
@@ -320,8 +284,8 @@ impl Lv2Instance {
                 None => ptr::null(),
             }
         };
-        // The worker extension, resolved the same way.  Null when the plugin
-        // has none; an interface whose `work` is null has nothing to run.
+        // Null when the plugin has none.  An interface whose `work` is null
+        // has nothing to run.
         // SAFETY: as above, `descriptor` points into the module the core
         // keeps loaded, and the URI is the null-terminated one the header
         // names; a non-null result points at the plugin's interface.
@@ -342,10 +306,10 @@ impl Lv2Instance {
                 .as_ref()
                 .is_some_and(|interface| interface.work.is_some())
         };
-        // Only a plugin whose requests can reach `work` may schedule.  This is
-        // before the restore, so a restore can queue requests.  They are
-        // drained on this thread before activate.  A request the zero-frame
-        // run schedules waits until the worker is registered below.
+        // Only a plugin whose requests can reach `work` may schedule.
+        // Before the restore, so it can queue.  Drained on this thread
+        // before activate.  A request the zero-frame run schedules waits
+        // for registration below.
         if has_work {
             rings.accept_requests();
         }
@@ -372,28 +336,23 @@ impl Lv2Instance {
         // class rules allow: no audio-class call can overlap it.
         buffers.connect(handle, descriptor);
 
-        // The control input buffers already hold their declared defaults
-        // (`PortBuffers::new`), hidden controls included, so a fresh plugin
-        // sees `lv2:default` rather than zero.
+        // Hidden controls included: a fresh plugin sees `lv2:default`, not
+        // zero.
         let ranges: Arc<[Lv2Range]> =
             Arc::from(std::mem::take(&mut table.ranges).into_boxed_slice());
         let ids = Arc::clone(&table.ids);
         let mut native: Vec<f32> = ranges.iter().map(|range| range.default as f32).collect();
 
-        // The state blob goes in first, then the saved controls on top.  LV2
-        // state holds no control ports, so every saved value still applies
-        // when the blob loaded: `params` is asked for the full list, not the
-        // blob's snapshot rule.  Both are before activation, so no block can
-        // see the defaults in between.  A blob the plugin cannot take is
-        // logged once by `state::restore`; the saved parameters still
-        // describe the effect.
+        // The blob first, then saved controls.  LV2 state holds no control
+        // ports, so every saved value still applies, and both are before
+        // activation.  A blob the plugin refuses is logged by
+        // `state::restore`; the saved parameters still describe the effect.
         let state_loaded = match restore.state.as_deref() {
             Some(bytes) => state::restore(handle, state_interface, bytes, core._features.as_ptr()),
             None => false,
         };
-        // `state:loadDefaultState`: the bundle's default state stands in for
-        // a saved one, also when the saved blob did not load.  It is not the
-        // saved state, so it does not make the load current.
+        // The bundle's default stands in when no saved blob loaded.  It is
+        // not the saved state, so the load is not current.
         if !state_loaded {
             if let Some(default_state) = default_state {
                 state::restore_default(
@@ -404,12 +363,11 @@ impl Lv2Instance {
                 );
             }
         }
-        // Requests the restores queued are run here, before activate and
-        // before the instance is registered, so no audio thread is inside
-        // `run` and the worker thread does not know this instance.  `work`
-        // may schedule another request, so the drain continues until the
-        // ring is empty.  Responses wait for `run_zero`.  A request `run(0)`
-        // schedules later is left in the ring.
+        // Before activate and before registration: no audio thread is inside
+        // `run`, and the worker thread does not know this instance.  `work`
+        // may schedule another request, so the drain runs until the ring is
+        // empty.  Responses wait for `run_zero`.  A request `run(0)`
+        // schedules later stays queued.
         if has_work && core._rings.request_pending() {
             let mut request = vec![0u8; worker::RING_BYTES];
             let failed = AtomicBool::new(false);
@@ -460,8 +418,6 @@ impl Lv2Instance {
         };
         instance.activate();
         instance.run_zero(&mut buffers);
-        // The audio half needs the interface's two audio-class functions;
-        // either may be absent.
         // SAFETY: the interface points into the module the core keeps loaded,
         // and the callbacks are only used while this instance exists.
         let worker_callbacks = unsafe {
@@ -474,12 +430,11 @@ impl Lv2Instance {
                     end_run: interface.end_run,
                 })
         };
-        // The first value goes out with the views of the new effect.
+        // So the views of the new effect are not reported as a change.
         shared.take_latency_change();
 
-        // The zero-frame run may have updated read-only controls (meters,
-        // gain reduction).  Control inputs belong to the panel and the saved
-        // values; a buffer is never copied back over them.
+        // Read-only controls may have moved.  A control input is never
+        // copied back over the panel's value.
         let updated: Vec<(usize, f32)> = ranges
             .iter()
             .enumerate()
@@ -494,8 +449,8 @@ impl Lv2Instance {
         let (to_audio, from_ui) = param_transfer(ids.len());
         let (to_ui, from_audio) = param_transfer(ids.len());
         let out = Arc::new(ParamOut::new(Arc::clone(&ids), to_audio));
-        // The processor reports an output only when its value moves, so the
-        // baseline is what the load's zero-frame run left in the buffers.
+        // An output is reported only when it moves, so the baseline is what
+        // `run(0)` left.
         let reported: Vec<u32> = ranges
             .iter()
             .map(|range| buffers.control(range.slot).to_bits())
@@ -513,14 +468,10 @@ impl Lv2Instance {
             worker: worker_callbacks,
             core: Arc::clone(&core),
         };
-        // The worker is registered only now.  Requests a restore scheduled
-        // were drained on this thread, and the zero-frame run is done, so no
-        // `work` can race them.  A request `run(0)` scheduled stays in the
-        // ring and is served from here on.  A plugin without a `work`
-        // function had every request refused.  The processor exists already,
-        // so a failure here hands the buffers to the core like any teardown,
-        // and they outlive `cleanup`; the requests queued so far go with the
-        // instance.
+        // After the restore drain and the zero-frame run, so `work` cannot
+        // race them.  A request `run(0)` scheduled stays queued.  On failure
+        // the buffers go to the core, as on any teardown, and outlive
+        // `cleanup`.
         if has_work {
             let registered =
                 worker::register(handle, worker_interface, Arc::clone(&core._rings))
@@ -540,18 +491,15 @@ impl Lv2Instance {
         })
     }
 
-    /// Wakes the process-wide worker thread when this instance has a request
-    /// waiting, so the request need not wait for the thread's park timeout.
-    /// UI thread, once per frame drawn.  An idle UI may not repaint; then
-    /// that timeout is what bounds the wait.
+    /// UI thread, once per frame.  An idle UI may not repaint; then the
+    /// park timeout bounds the wait.
     pub(crate) fn service_worker(&self) {
         if let Some(worker) = self.core.worker.get() {
             worker::wake(worker);
         }
     }
 
-    /// `activate`, once, at load.  `activate` returns void, so it cannot
-    /// fail.
+    /// Once, at load.  `activate` returns void, so it cannot fail.
     fn activate(&mut self) {
         if self.core.active.load(Ordering::Acquire) {
             return;
@@ -566,12 +514,10 @@ impl Lv2Instance {
         self.core.active.store(true, Ordering::Release);
     }
 
-    /// Runs the plugin for zero frames so it updates its control outputs and
-    /// latency port.  An audio-class call, made at load before the processor
-    /// has the buffers; the atom ports are re-armed first, so the plugin sees
-    /// an empty input sequence and a cleared output.  Worker responses a
-    /// restore's `work` queued are delivered before `run`, and `end_run`
-    /// follows it.
+    /// Zero frames, so control outputs and latency update without audio.
+    /// Audio-class, at load, before the processor has the buffers.  Atom
+    /// ports are re-armed first.  Responses are delivered before `run`, and
+    /// `end_run` follows.
     pub(super) fn run_zero(&self, buffers: &mut PortBuffers) {
         // SAFETY: the descriptor belongs to the module the core keeps loaded;
         // the test fake has a null descriptor, for which this is a no-op.
@@ -596,8 +542,7 @@ impl Lv2Instance {
         // SAFETY: the ports are connected, the instance is active, and no
         // other block is inside the plugin: the processor does not exist yet.
         unsafe { run(self.core.handle, 0) };
-        // The worker interface's `end_run` follows every `run`, this
-        // zero-frame one included.
+        // `end_run` follows every `run`, this zero-frame one included.
         if let Some(end_run) = self.worker_end_run {
             // SAFETY: `end_run` is audio-class, and this is the run context
             // the instance is in.
@@ -612,9 +557,8 @@ impl Lv2Instance {
         }
     }
 
-    /// Reads the latency port's last reported value into [`PluginShared`].
-    /// The port itself lives in the processor's buffers; the processor
-    /// updates [`Lv2Core::latency_raw`] after every block.
+    /// The port lives in the processor, which publishes
+    /// [`Lv2Core::latency_raw`].
     pub(crate) fn reread_latency_if_changed(&mut self) {
         if self.core.latency_changed.swap(false, Ordering::AcqRel) {
             self.shared.set_latency(self.raw_latency());
@@ -627,8 +571,6 @@ impl Lv2Instance {
         ))
     }
 
-    /// The control views, from the values the panel and the plugin last
-    /// agreed on.
     pub(crate) fn parameters(&self) -> Vec<PluginParamView> {
         self.ranges
             .iter()
@@ -637,7 +579,6 @@ impl Lv2Instance {
             .collect()
     }
 
-    /// The views every control has at its declared default.
     pub(crate) fn default_views(&self) -> Vec<PluginParamView> {
         self.ranges
             .iter()
@@ -645,8 +586,6 @@ impl Lv2Instance {
             .collect()
     }
 
-    /// The writable controls' defaults, `(index, normalized)` in the
-    /// processor's table.
     pub(crate) fn default_values(&self) -> Vec<(usize, f64)> {
         self.ranges
             .iter()
@@ -656,7 +595,6 @@ impl Lv2Instance {
             .collect()
     }
 
-    /// The plugin's text for a normalized value of `id`.
     pub(crate) fn display_for(&self, id: u32, value: f64) -> String {
         let Some(range) = self.ranges.iter().find(|range| range.id == id) else {
             return String::new();
@@ -664,27 +602,20 @@ impl Lv2Instance {
         range.display(range.denormalise(value))
     }
 
-    /// Records a normalized value for the control at `index`: one the panel
-    /// set (or reset), or one the audio side reported.
     pub(crate) fn note_value(&mut self, index: usize, normalized: f64) {
         if let Some(range) = self.ranges.get(index) {
             self.values[index] = range.denormalise(normalized) as f32;
         }
     }
 
-    /// Whether `id` is a control the plugin reports, which the host never
-    /// sets.
     pub(crate) fn is_read_only(&self, id: u32) -> bool {
         self.ranges
             .iter()
             .any(|range| range.id == id && range.read_only)
     }
 
-    /// Captures the plugin's state into the blob the preferences store.  UI
-    /// thread; `state.h` lets `save` overlap `run`, so no pause is needed.  A
-    /// plugin without a state interface saves nothing, and so does a failed
-    /// save: [`StateSave::Unavailable`] keeps its parameters as the only
-    /// description.
+    /// UI thread.  `state.h` lets `save` overlap `run`, so no pause.  No
+    /// interface, or a failed save, is [`StateSave::Unavailable`].
     pub(crate) fn save_state(&self) -> StateSave {
         if self.state.is_null() {
             return StateSave::Unavailable;
@@ -702,11 +633,8 @@ impl Lv2Instance {
         false
     }
 
-    /// Queues normalized `(index, value)` values for the processor.  LV2
-    /// reads its control buffers during `run`, so nothing is called on the
-    /// plugin from the UI, even while it is not processing: the values wait
-    /// for the next block or a skipped effect's flush.  That is also why the
-    /// UI cannot flush them itself when the stream is stopped, unlike CLAP.
+    /// LV2 reads controls during `run`, so nothing is called from the UI.
+    /// A stopped stream cannot flush them here.
     fn send_values(&self, io: &mut HostIo<'_>, values: &[(usize, f64)]) {
         for &(index, value) in values {
             io.out.push(index, value);
@@ -790,7 +718,6 @@ impl PluginHostUi for Lv2Instance {
 
 #[cfg(test)]
 impl Lv2Instance {
-    /// An instance with no plugin behind it, for the handle-level tests.
     pub(super) fn for_test(
         ranges: Arc<[Lv2Range]>,
         values: Vec<f32>,
@@ -808,14 +735,10 @@ impl Lv2Instance {
         }
     }
 
-    /// Points the instance at a fake state extension, for the tests that
-    /// exercise [`Lv2Instance::save_state`] without a binary.
     pub(super) fn set_state_interface_for_test(&mut self, interface: *const LV2_State_Interface) {
         self.state = interface;
     }
 
-    /// Gives the instance a fake worker `end_run`, for the zero-frame run
-    /// test.
     pub(super) fn set_worker_end_run_for_test(
         &mut self,
         end_run: Option<unsafe extern "C" fn(LV2_Handle) -> LV2_Worker_Status>,
@@ -824,8 +747,7 @@ impl Lv2Instance {
     }
 }
 
-/// The bundle path with a trailing directory separator, as `instantiate`
-/// requires.
+/// A trailing separator, as `instantiate` requires.
 fn trailing_separator(bundle: &Path) -> String {
     let mut path = bundle.to_string_lossy().into_owned();
     while path.ends_with(['/', '\\']) {
@@ -835,7 +757,6 @@ fn trailing_separator(bundle: &Path) -> String {
     path
 }
 
-/// A latency report as whole frames, never negative.
 fn frames_from(raw: f32) -> u32 {
     raw.max(0.0).round() as u32
 }

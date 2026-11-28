@@ -1,57 +1,42 @@
-//! LV2 state, saved as the opaque blob `PluginState` already keeps.
+//! LV2 state as the opaque blob preferences keep.
 //!
-//! LV2 keeps state as a set of keyed properties, each a value with a type URI
-//! and flags, not as bytes.  The preferences keep bytes (base64 in the
-//! `PluginState`), so this module turns one into the other.  The framing is
-//! little-endian:
+//! Properties are keyed values, not bytes.  The framing is little-endian,
+//! and only the framing is ours:
 //!
 //! ```text
 //! magic   "RWL2ST01"   8 bytes
 //! version u32          1
-//! count   u32          number of records that follow
+//! count   u32
 //! record  key length u32, key URI bytes
 //!         type length u32, type URI bytes
 //!         flags u32
 //!         value length u32, value bytes
 //! ```
 //!
-//! Only the framing is ours: the value bytes are the plugin's own, in the
-//! type it named, and are copied back unchanged except a top-level
-//! `atom:URID`, which is stored as the URI and mapped again on restore.  The
-//! blob stores URIs, never the process's URIDs, so it outlives the run that
-//! wrote it; at restore every URI is mapped again.  A blob is capped at
-//! [`MAX_STATE_BLOB`], the size the preferences keep.  A value whose body
-//! contains URIDs (an `atom:Object`, a sequence, anything nested) stays
-//! opaque bytes.
+//! Value bytes are copied back unchanged except a top-level `atom:URID`,
+//! stored as the URI and mapped again on restore.  The blob stores URIs,
+//! never this process's URIDs.  Nested atoms stay opaque.  Only
+//! `LV2_STATE_IS_POD` is saved: anything else is a pointer or a handle.
+//! `LV2_STATE_IS_NATIVE` is refused even with POD: it is only valid in the
+//! process that wrote it.  Control ports are the saved parameters, applied
+//! on top.  A blob is capped at [`MAX_STATE_BLOB`].
 //!
-//! Only values flagged `LV2_STATE_IS_POD` are saved, deliberately: anything
-//! else is a pointer or a handle that would not survive the save.  A value
-//! flagged `LV2_STATE_IS_NATIVE` is refused even when it also claims POD,
-//! because it is only valid in the process that wrote it.  Control port
-//! values are not part of the state; they are the saved parameters, which
-//! `Restore::params` applies on top.
+//! A zero-byte value is kept.  `state.h` asks for at least one byte, but
+//! `eg-params` stores empty strings and paths that way, and refusing them
+//! fails the whole save.
 //!
-//! A zero-byte value is kept as an empty record, although `state.h` asks
-//! for at least one byte: real plugins store their default empty strings and
-//! paths that way (`eg-params` does), and refusing them fails the whole
-//! save.
+//! `state:loadDefaultState` restores the bundle's `state:state` when no
+//! saved blob was.  Turtle becomes atoms as lilv (through sratom) does: a
+//! `file:` IRI is an `atom:Path` (absolute; identity `state:mapPath` returns
+//! it unchanged), another IRI an `atom:URID`, `xsd:int`/`integer` an
+//! `atom:Int`, `xsd:long` an `atom:Long`, `xsd:float`/`decimal` an
+//! `atom:Float`, `xsd:double` an `atom:Double`, `xsd:boolean` an `atom:Bool`,
+//! a plain literal an `atom:String`.  A blank node, another datatype, or a
+//! language tag is left out; the plugin sees that key as absent.
 //!
-//! A plugin that lists `state:loadDefaultState` gets its `state:state` from
-//! the bundle restored at load when no saved blob was restored.  The Turtle
-//! values become atoms the way lilv (through sratom) makes them: a `file:`
-//! IRI is an `atom:Path` (absolute, which the identity `state:mapPath`
-//! hands back unchanged), another IRI an `atom:URID`, `xsd:int`/`integer`
-//! an `atom:Int`, `xsd:long` an `atom:Long`, `xsd:float`/`decimal` an
-//! `atom:Float`, `xsd:double` an `atom:Double`, `xsd:boolean` an
-//! `atom:Bool`, and a plain literal an `atom:String`.  Any other value (a
-//! blank node, another datatype, a language tag) is left out with one log
-//! line; the plugin sees that key as absent.
-//!
-//! `save` and `restore` call the plugin's `LV2_State_Interface` with the
-//! instance's feature array, so a plugin that looks `state:mapPath` or
-//! `state:freePath` up in it finds them.  `restore` is an instantiation-class
-//! call and runs at load, before `activate`.  `save` may run while `run` does,
-//! per `state.h`, so a capture needs no pause.
+//! `restore` is instantiation-class, at load, before `activate`.  `save` may
+//! overlap `run`, per `state.h`, so a capture needs no pause.  Both calls
+//! get the instance's feature array, so `state:mapPath` is visible in it.
 
 use std::ffi::{c_void, CStr, CString};
 use std::ptr;
@@ -86,18 +71,13 @@ const ATOM_DOUBLE: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/atom#Double";
 const ATOM_BOOL: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/atom#Bool";
 const ATOM_STRING: &std::ffi::CStr = c"http://lv2plug.in/ns/ext/atom#String";
 
-/// The first eight bytes of every blob.
 const MAGIC: &[u8; 8] = b"RWL2ST01";
-/// The layout version inside the magic.
 const VERSION: u32 = 1;
-/// Magic, version and count, before the first record.
 const HEADER_BYTES: usize = 8 + 4 + 4;
-/// The four length/flag words every record starts with, so a count cannot
-/// claim more records than the blob could hold.
+/// So a count cannot claim more records than the blob could hold.
 const MIN_RECORD_BYTES: usize = 4 + 4 + 4 + 4;
 
-/// One property a plugin stored: the key and type as URIs, the flags it gave
-/// them, and the value bytes.
+/// Key and type as URIs, so the blob outlives this process's URIDs.
 struct Record {
     key: CString,
     type_: CString,
@@ -106,13 +86,11 @@ struct Record {
 }
 
 impl Record {
-    /// The bytes this record adds to the blob, length prefixes included.
     fn encoded_len(&self) -> usize {
         4 + self.key.as_bytes().len() + 4 + self.type_.as_bytes().len() + 4 + 4 + self.value.len()
     }
 }
 
-/// What one `save` accumulates: the records and the encoded size so far.
 /// The `store` callback's handle.
 #[derive(Default)]
 struct SaveSink {
@@ -121,7 +99,6 @@ struct SaveSink {
 }
 
 impl SaveSink {
-    /// Whether one more `encoded` bytes still fit under the cap.
     fn has_room(&self, encoded: usize) -> bool {
         HEADER_BYTES
             .checked_add(self.encoded)
@@ -130,10 +107,7 @@ impl SaveSink {
     }
 }
 
-/// Saves the plugin's state as a blob.  UI thread; `state.h` allows this to
-/// overlap `run`.  The handle is the plugin's instance handle, `interface`
-/// its state extension, and `features` the null-terminated feature array it
-/// was instantiated with.
+/// UI thread.  `state.h` allows this to overlap `run`.
 pub(crate) fn save(
     handle: LV2_Handle,
     interface: *const LV2_State_Interface,
@@ -155,8 +129,8 @@ pub(crate) fn save(
         )
     };
     if status != LV2_STATE_SUCCESS {
-        // The plugin reports what it understood: a plugin that handles
-        // `NO_SPACE` itself and stores something smaller still succeeds.
+        // A plugin that handles `NO_SPACE` itself and stores less still
+        // succeeds.  This status is the plugin's, not a latched overflow.
         return if status == LV2_STATE_ERR_NO_SPACE {
             Err(format!(
                 "The LV2 plugin's state is larger than {} MB.",
@@ -172,8 +146,7 @@ pub(crate) fn save(
     Ok(encode(&sink.records))
 }
 
-/// Writes the records in the layout the module doc describes.  Callers have
-/// already kept the total under the cap.
+/// Callers have already kept the total under the cap.
 fn encode(records: &[Record]) -> Vec<u8> {
     let size = HEADER_BYTES + records.iter().map(Record::encoded_len).sum::<usize>();
     let mut bytes = Vec::with_capacity(size);
@@ -194,20 +167,14 @@ fn encode(records: &[Record]) -> Vec<u8> {
     bytes
 }
 
-/// `LV2_State_Interface.save`'s store callback: copies one value into the
-/// sink.  A value that cannot be saved gets the status that says why — a
-/// non-POD or native value `LV2_STATE_ERR_BAD_FLAGS`, an unknown key or type
-/// `LV2_STATE_ERR_UNKNOWN`, a value that does not fit
-/// `LV2_STATE_ERR_NO_SPACE` — and stays out of the blob.
+/// A zero-byte value is stored empty.  `state.h` asks for at least one
+/// byte, but `eg-params` stores empty strings and paths, and refusing them
+/// fails the whole save.
 ///
-/// A zero-byte value is stored as an empty record.  `state.h` asks plugins
-/// for at least one byte, but some store their default empty string or path
-/// anyway (`eg-params` does), and refusing that fails their whole save.
-///
-/// A top-level `atom:URID` is stored as the URI it names, not the `u32`.
-/// A value that is not four native-endian bytes, or an id the map does not
-/// know, is refused here.  The plugin's `save` decides whether that fails
-/// the whole save.  Nested atoms are not walked.
+/// A top-level `atom:URID` is stored as the URI, not the `u32`.  A value
+/// that is not four native-endian bytes, or an id the map does not know, is
+/// refused here; the plugin's `save` decides whether that fails the save.
+/// Nested atoms are not walked.
 unsafe extern "C" fn store(
     handle: *mut c_void,
     key: LV2_URID,
@@ -244,8 +211,8 @@ unsafe extern "C" fn store(
             Err(status) => return status,
         }
     } else if size == 0 {
-        // An empty value has no bytes to read, and `value` may even be null.
-        // Store it as empty rather than fail the plugin's whole save.
+        // No bytes to read, and `value` may be null.  Store empty rather
+        // than fail the whole save.
         Vec::new()
     } else if value.is_null() {
         // A null pointer with a length names no readable bytes.
@@ -270,9 +237,8 @@ unsafe extern "C" fn store(
     LV2_STATE_SUCCESS
 }
 
-/// The bytes a top-level `atom:URID` is stored as: the URI, with no trailing
-/// NUL.  The numeric id belongs to this process.  `unmap` returning null, a
-/// null pointer, or a size other than 4 refuses the value.
+/// The URI, with no trailing NUL.  The numeric id belongs to this process.
+/// Null, a size other than 4, or an id the map does not know refuses it.
 fn stored_urid(value: *const c_void, size: usize) -> Result<Vec<u8>, LV2_State_Status> {
     if size != std::mem::size_of::<u32>() {
         eprintln!("[plugins] not saving an LV2 state value: an atom:URID is not 4 bytes");
@@ -298,13 +264,9 @@ fn stored_urid(value: *const c_void, size: usize) -> Result<Vec<u8>, LV2_State_S
     Ok(uri.to_bytes().to_vec())
 }
 
-/// Restores a state blob into the plugin.  An instantiation-class call: UI
-/// thread, before `activate` or with processing paused.  The handle is the
-/// plugin's instance handle, `interface` its state extension, and `features`
-/// the null-terminated feature array it was instantiated with.
-///
-/// `false` for a missing interface, a malformed blob, or a restore the
-/// plugin refused; the caller then falls back to the saved control values.
+/// Instantiation class: UI thread, before `activate` or with processing
+/// paused.  `false` when there is no interface, the blob is malformed, or
+/// the plugin refused it; the caller then uses the saved controls.
 pub(crate) fn restore(
     handle: LV2_Handle,
     interface: *const LV2_State_Interface,
@@ -326,8 +288,7 @@ pub(crate) fn restore(
     restore_records(restore, handle, &records, features)
 }
 
-/// Hands `records` to the plugin's `restore`.  `false`, with one log line,
-/// when the plugin refused them.
+/// `false`, with one log line, when the plugin refused the records.
 fn restore_records(
     restore: unsafe extern "C" fn(
         LV2_Handle,
@@ -361,14 +322,13 @@ fn restore_records(
     true
 }
 
-/// A plugin's `state:state` from its bundle, as records ready to restore.
+/// The bundle's `state:state`, as records ready to restore.
 pub(crate) struct DefaultState {
     records: Vec<RestoreRecord>,
 }
 
-/// Whether `plugin` lists `state:loadDefaultState` as `lv2:requiredFeature`.
-/// An optional listing does not count: with no state to restore, the load
-/// omits the feature instead of failing.
+/// Required only.  An optional listing does not count: with nothing to
+/// restore, the load omits the feature instead of failing.
 pub(crate) fn requires_load_default(store: &TtlStore, plugin: &str) -> bool {
     store
         .iris(plugin, LV2_REQUIRED_FEATURE)
@@ -376,9 +336,9 @@ pub(crate) fn requires_load_default(store: &TtlStore, plugin: &str) -> bool {
         .any(|feature| feature == STATE_LOAD_DEFAULT)
 }
 
-/// The default state to load for `plugin`: its `state:state` when it lists
-/// `state:loadDefaultState` as a required or optional feature, or `None`.
-/// UI thread; the URIs are mapped here.
+/// The bundle's `state:state` when the plugin lists
+/// `state:loadDefaultState`, required or optional.  UI thread: the URIs
+/// are mapped here.
 pub(crate) fn default_state(store: &TtlStore, plugin: &str) -> Option<DefaultState> {
     let wants = store
         .iris(plugin, LV2_REQUIRED_FEATURE)
@@ -414,8 +374,8 @@ pub(crate) fn default_state(store: &TtlStore, plugin: &str) -> Option<DefaultSta
     Some(DefaultState { records })
 }
 
-/// The atom type, flags and body a Turtle value restores as, or `None` for
-/// a kind lilv would build an atom for that this host does not.
+/// `None` for a Turtle value lilv would turn into an atom that this host
+/// does not.
 fn default_value(object: &Object) -> Option<(&'static std::ffi::CStr, u32, Vec<u8>)> {
     let pod = u32::from(LV2_State_Flags::LV2_STATE_IS_POD);
     let portable = pod | u32::from(LV2_State_Flags::LV2_STATE_IS_PORTABLE);
@@ -476,9 +436,8 @@ fn default_value(object: &Object) -> Option<(&'static std::ffi::CStr, u32, Vec<u
     }
 }
 
-/// Restores a plugin's default state.  Instantiation class, at load before
-/// `activate`, like [`restore`]; `false` when it has no interface that
-/// restores or the plugin refused the values.
+/// Instantiation class, at load before `activate`.  `false` when the
+/// plugin cannot restore or refused the values.
 pub(crate) fn restore_default(
     handle: LV2_Handle,
     interface: *const LV2_State_Interface,
@@ -493,8 +452,8 @@ pub(crate) fn restore_default(
     restore_records(restore, handle, &state.records, features)
 }
 
-/// What a parsed record holds before its URIs are mapped: the whole blob is
-/// checked first, so a malformed one never grows the process-wide URID table.
+/// Before URIs are mapped.  A malformed blob is refused first, so it never
+/// grows the process-wide URID table.
 struct DecodedRecord {
     key: CString,
     type_: CString,
@@ -502,8 +461,8 @@ struct DecodedRecord {
     value: Vec<u8>,
 }
 
-/// One accepted record with its URIDs, kept in a `Vec` so the value pointers
-/// the retrieve callback hands out stay put for the whole restore.
+/// Kept in a `Vec` so the pointers [`retrieve`] hands out stay put for the
+/// whole restore.
 struct RestoreRecord {
     key: LV2_URID,
     type_: LV2_URID,
@@ -511,8 +470,7 @@ struct RestoreRecord {
     value: Vec<u8>,
 }
 
-/// Parses a blob into records, logging once when it cannot.  A blob from an
-/// older or newer build is refused, never trusted and never allowed to
+/// A blob from another build is refused.  It is never trusted and must not
 /// panic.
 fn decode(bytes: &[u8]) -> Option<Vec<RestoreRecord>> {
     match parse(bytes).and_then(map_records) {
@@ -563,10 +521,9 @@ fn parse(bytes: &[u8]) -> Result<Vec<DecodedRecord>, &'static str> {
     Ok(records)
 }
 
-/// Maps the URIs of an accepted blob.  UI thread; the map may insert.  A
-/// top-level `atom:URID` value is the URI text and becomes the id the map
-/// returns for it now.  An empty, non-UTF8 or interior-NUL URI refuses the
-/// blob, as an unmappable key does.  Nested atoms are left as stored.
+/// UI thread; the map may insert.  A top-level `atom:URID` is URI text and
+/// becomes the id the map returns now.  An empty, non-UTF8 or interior-NUL
+/// URI refuses the blob.  Nested atoms are left as stored.
 fn map_records(records: Vec<DecodedRecord>) -> Result<Vec<RestoreRecord>, &'static str> {
     let map = urid::global();
     records
@@ -592,8 +549,7 @@ fn map_records(records: Vec<DecodedRecord>) -> Result<Vec<RestoreRecord>, &'stat
         .collect()
 }
 
-/// A stored top-level `atom:URID`: URI bytes in, the current id's
-/// native-endian bytes out.
+/// URI bytes in, the current id's native-endian bytes out.
 fn mapped_urid(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
     if bytes.is_empty() || std::str::from_utf8(bytes).is_err() {
         return Err("a key or type URI cannot be mapped");
@@ -606,8 +562,7 @@ fn mapped_urid(bytes: &[u8]) -> Result<Vec<u8>, &'static str> {
     Ok(id.to_ne_bytes().to_vec())
 }
 
-/// The forward-only reader over a blob.  Every accessor returns `None` when
-/// the bytes are not there.
+/// Every accessor returns `None` when the bytes are not there.
 struct Reader<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -630,7 +585,7 @@ impl<'a> Reader<'a> {
         Some(u32::from_le_bytes(bytes))
     }
 
-    /// A length-prefixed URI, as a `CString` the URID map can take again.
+    /// A length-prefixed URI, as a `CString` the map can take again.
     fn uri(&mut self) -> Result<CString, &'static str> {
         let length = self.u32().ok_or("a URI length is missing")? as usize;
         if length > self.remaining() {
@@ -641,16 +596,13 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// The pointer [`retrieve`] returns for an empty value: non-null and valid
-/// for zero bytes.  An empty `Vec`'s `as_ptr` is dangling (though never
-/// dereferenced at size 0), and a null pointer would look like "absent".
+/// Non-null and valid for zero bytes.  An empty `Vec`'s `as_ptr` is
+/// dangling, and null would look like "absent".
 static EMPTY_VALUE: [u8; 0] = [];
 
-/// `LV2_State_Interface.restore`'s retrieve callback: the last record with
-/// `key` (a plugin that stored a key twice meant the later value), or null
-/// when the blob has none.  The value stays valid until the restore returns,
-/// because the records are not touched during it.  An empty record answers
-/// with [`EMPTY_VALUE`], not null, so it is distinguishable from absence.
+/// The last record with `key`: a key stored twice meant the later value.
+/// The pointer stays valid until restore returns.  An empty record answers
+/// with [`EMPTY_VALUE`], not null, so it is not "absent".
 unsafe extern "C" fn retrieve(
     handle: *mut c_void,
     key: LV2_URID,
@@ -685,7 +637,7 @@ unsafe extern "C" fn retrieve(
     }
 }
 
-/// The name of a state status, for the one log line a failure gets.
+/// For the one log line a failure gets.
 fn status_name(status: LV2_State_Status) -> &'static str {
     if status == LV2_STATE_SUCCESS {
         "SUCCESS"

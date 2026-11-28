@@ -1,9 +1,5 @@
-//! The scope sheet (`docs/ui-spec.md` §3.3): the input and output traces
-//! overlaid, their peaks, the sample count and the estimate.
-//!
-//! The curves are the peak-hold bins the frame publishes, not a decorative
-//! oscillator.  The sheet reads the palette, so it looks the same in both
-//! themes as the console behind it.
+//! The scope sheet.  The curves are the peak-hold bins the frame publishes,
+//! not a decorative oscillator.
 
 use eframe::egui;
 use egui::{Align2, CornerRadius, Rect, RichText, Sense, Stroke, Vec2};
@@ -19,7 +15,6 @@ use crate::ui::theme::{font, palette, Palette, TypeRole};
 const TRACE_H: f32 = 220.0;
 
 impl RigWerkApp {
-    /// The scope sheet's body.
     pub(crate) fn scope_sheet(&mut self, ui: &mut egui::Ui) {
         let colours = palette(ui.ctx());
         let width = ui.available_width().max(240.0);

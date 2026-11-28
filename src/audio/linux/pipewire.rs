@@ -1,14 +1,6 @@
-//! PipeWire graph quantum, read and requested through `pw-metadata`.
-//!
-//! The device list and the bridge streams are a native client (`native`).
-//! This module only owns the desktop-wide `clock.force-quantum` switch, which
-//! stays behind the low-latency control because it pins every app on the
-//! graph. Node latency for our own streams is set separately.
-//!
-//! The quantum is the number of frames PipeWire processes per graph cycle.
-//! 64 frames at 48 kHz is about 1.3 ms, which RigWerk counts as low latency;
-//! anything above [`PIPEWIRE_LOW_QUANTUM_MAX`] is shown as the desktop's
-//! shared size instead.
+//! Desktop-wide `clock.force-quantum` through `pw-metadata`.  It pins every
+//! app on the graph, so it stays behind the low-latency control.  Node
+//! latency for our own streams is set separately.
 
 use std::env;
 use std::fs;
@@ -20,28 +12,24 @@ use crate::audio::types::{DeviceItem, QuantumInfo};
 
 use super::alsa::{alsa_pcm_is_default, alsa_pcm_name};
 
-/// The quantum RigWerk asks for while the low-latency bridge runs.
 pub(crate) const LOW_QUANTUM: u32 = crate::audio::types::PIPEWIRE_LOW_QUANTUM;
 
-/// What the PipeWire settings store says right now.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct State {
     pub(crate) quantum: u32,
     pub(crate) rate: u32,
 }
 
-/// A cpal ALSA id that names the PipeWire plugin directly.
 pub(crate) fn is_pipewire_pcm(device_id: &str) -> bool {
     alsa_pcm_name(device_id)
         .to_ascii_lowercase()
         .contains("pipewire")
 }
 
-/// The `default` PCM is PipeWire only when ALSA's own default plugin says so.
-///
-/// A running PipeWire socket is not enough: PulseAudio often leaves that
-/// socket on a machine whose `pcm.!default` is still `type pulse`. Forcing a
-/// 64-frame quantum on that default would pin the wrong server.
+/// `default` is PipeWire only when ALSA's default plugin says so.  A
+/// running socket is not enough: Pulse often leaves one while
+/// `pcm.!default` is still `type pulse`.  Forcing 64 frames there pins
+/// the wrong server.
 pub(crate) fn is_pipewire_endpoint(device_id: &str, name: &str) -> bool {
     if is_pipewire_pcm(device_id) || name.to_ascii_lowercase().contains("pipewire") {
         return true;
@@ -49,10 +37,8 @@ pub(crate) fn is_pipewire_endpoint(device_id: &str, name: &str) -> bool {
     alsa_pcm_is_default(device_id) && default_plugin_is_pipewire()
 }
 
-/// Whether the last `pcm.!default` block in an ALSA config uses `type pipewire`.
-///
-/// Later blocks win, which is how `/etc/asound.conf` and `~/.asoundrc` override
-/// the snippets under `alsa.conf.d`.
+/// Later blocks win: `/etc/asound.conf` and `~/.asoundrc` override
+/// `alsa.conf.d`.
 pub(crate) fn default_pcm_is_pipewire(config: &str) -> bool {
     let mut last = false;
     let mut search_from = 0;
@@ -129,7 +115,7 @@ pub(crate) fn is_pipewire_device(device: &DeviceItem) -> bool {
         || is_pipewire_endpoint(&device.id, &device.name)
 }
 
-/// Reads one value from `pw-metadata -n settings` output, e.g.
+/// One `pw-metadata -n settings` value, e.g.
 /// `update: id:0 key:'clock.quantum' value:'1024' type:''`.
 fn metadata_value(text: &str, key: &str) -> Option<u32> {
     let needle = format!("key:'{key}'");
@@ -175,16 +161,12 @@ fn read_metadata() -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// The server's current quantum and rate, or `None` when `pw-metadata` is not
-/// installed or PipeWire is not running.
+/// `None` when `pw-metadata` is missing or PipeWire is not running.
 pub(crate) fn state() -> Option<State> {
     read_metadata().map(|text| parse_state(&text))
 }
 
-/// The quantum someone forced before RigWerk changes it.
-///
-/// `Ok(0)` means the store was read and nothing is forced. `Err` means the
-/// store could not be read, which is not the same as "force nothing": a later
+/// `Ok(0)` was read and nothing is forced.  `Err` was not read: a later
 /// restore must not invent a 0 and clear a setting it never saw.
 pub(crate) fn read_forced_quantum() -> Result<u32, String> {
     let text = read_metadata().ok_or_else(|| {
@@ -193,12 +175,9 @@ pub(crate) fn read_forced_quantum() -> Result<u32, String> {
     Ok(metadata_value(&text, "clock.force-quantum").unwrap_or(0))
 }
 
-/// What to do with `clock.force-quantum` after one attempt to set it.
-///
-/// `previous` is `None` when the store could not be read. In that case nothing
-/// is written. A successful write is owned even when the read-back fails, so
-/// stop can still restore `previous`. `previous == 0` is a real "nothing was
-/// forced", not a stand-in for a failed read.
+/// `previous` is `None` when the store could not be read, and then nothing
+/// is written.  A write is owned even when the read-back fails, so stop can
+/// still restore it.  `previous == 0` means nothing was forced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum QuantumForce {
     Untouched,
@@ -244,23 +223,18 @@ fn write_metadata(key: &str, value: &str) -> Result<(), String> {
     }
 }
 
-/// Asks PipeWire for the low quantum.
-///
-/// `Ok(None)` means the write was accepted and the following read failed. The
-/// caller owns the force and must restore the previous value; a failed read is
-/// not a failed write.
+/// `Ok(None)`: the write was accepted and the read-back failed.  The caller
+/// owns the force and must restore the previous value.
 pub(crate) fn force_low_quantum() -> Result<Option<State>, String> {
     write_metadata("clock.force-quantum", &LOW_QUANTUM.to_string())?;
     Ok(state())
 }
 
-/// Gives the desktop its own quantum back. The error is returned so a failed
-/// restore can be shown instead of discarded.
+/// The error is returned so a failed restore is shown, not discarded.
 pub(crate) fn restore_quantum(previous: u32) -> Result<(), String> {
     write_metadata("clock.force-quantum", &previous.to_string())
 }
 
-/// Compares the output's ALSA period with the current PipeWire quantum.
 pub(crate) fn check_output(device: &DeviceItem, alsa_period: u32) -> Option<QuantumInfo> {
     if !is_pipewire_device(device) {
         return None;

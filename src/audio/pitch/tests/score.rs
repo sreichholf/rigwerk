@@ -1,6 +1,5 @@
-//! The phase 0 scores (§4.2 of the plan), computed against the synth's
-//! known partials.  Every function takes the output already lined up with
-//! the input (the reported latency removed).
+//! Against the synth's known partials.  Every function takes the output
+//! already lined up with the input (the reported latency removed).
 
 use std::f64::consts::TAU;
 
@@ -357,14 +356,10 @@ fn level_track(signal: &[f32], rate: u32, freq: f64, from: f64, to: f64) -> Vec<
     levels
 }
 
-/// The beat score: per resolved, beating partial whose beat makes at least
-/// one cycle in the sustain and moves the input's level by at least 1 dB
-/// (SD), the correlation of the output's level track at the target with the
-/// input's at the source, each with its straight-line decay trend removed.
-/// Against the input, not the reference: a shifter keeps the envelope in
-/// the input's time, so the beat keeps its rate (the reference, rendered at
-/// the target pitch, beats `r` times as fast).  1 is the beat kept as it
-/// is; 0 is a beat lost (or one the shifter made up).
+/// Correlation of a beating partial's level track with the input's,
+/// trend removed.  Against the input, not the reference: the shifter
+/// keeps the envelope in the input's time, so the beat keeps its rate.
+/// 1 is the beat kept; 0 is a beat lost.
 pub(super) fn beat_correlations(
     case: &Case,
     input: &[f32],
@@ -407,13 +402,9 @@ pub(super) fn beat_correlations(
     result
 }
 
-/// The flutter score: per resolved target partial, how far its frequency
-/// wanders over the sustain, cents (RMS about its mean), demodulated at a
-/// 5 ms hop under a 60 ms Hann as [`roughness`] is; the mean over the
-/// partials, for `out` and `reference`.  A time-domain shifter's splice
-/// moves a partial's phase when the heads are not in phase for it, which is
-/// what a full chord's chorusing is: it shows here, where an amplitude
-/// score sees little.
+/// How far a partial's frequency wanders, cents.  A splice moves the
+/// phase when the heads are not in phase for that partial: a full
+/// chord's chorusing, which an amplitude score does not see.
 pub(super) fn flutter(
     case: &Case,
     out: &[f32],

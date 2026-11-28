@@ -1,5 +1,5 @@
-//! Which devices are selected, what they are, and keeping the lists current
-//! when devices are plugged in or out.
+//! A busy device fails a probe the same way a missing one does, so a
+//! selected device counts as unplugged only after [`UNPLUG_SCANS`] misses.
 
 use crate::app::issues::StopReason;
 use crate::app::LogTone;
@@ -13,16 +13,9 @@ use std::time::Instant;
 use crate::app::settings::ExtraOutputPref;
 use crate::app::RigWerkApp;
 use crate::audio::{self, DeviceItem, Inventory};
-/// How many scans must miss a selected device before it counts as unplugged.
+
 const UNPLUG_SCANS: u8 = 2;
 
-/// The scanned device lists, the selection, and the scan plumbing.
-///
-/// The inventory and the selection must survive a scan that does not list the
-/// selected device: the held identities and the miss counters are what `save`
-/// keeps and what says a device is unplugged, so one flaky scan cannot drop a
-/// working device.  The scan receiver is here because one owner starts the
-/// scan thread and picks its result up.
 pub(crate) struct Devices {
     pub(crate) inventory: Inventory,
     pub(crate) asio_idx: usize,
@@ -42,12 +35,8 @@ pub(crate) struct Devices {
     pub(crate) input_held: Option<HeldDevice>,
     /// Stored output kept when startup did not find it.
     pub(crate) output_held: Option<HeldDevice>,
-    /// Consecutive scans that did not list the selected input. One miss is
-    /// not an unplug: a busy device fails a probe the same way a missing one
-    /// does. The bridge stops only after a second miss.
     input_misses: u8,
-    /// Consecutive scans that did not list the selected output.  Above 0,
-    /// the clock output's strip and sheet read missing.
+    /// Above 0, the clock strip and sheet read missing.
     pub(crate) output_misses: u8,
 }
 
@@ -325,7 +314,8 @@ pub(crate) struct HeldDevice {
     pub(crate) backend: String,
 }
 
-/// The identity `save` must keep when `restore` did not confirm a stored device.
+/// The identity `save` must keep when `restore` did not confirm a
+/// stored device.
 ///
 /// `None` means the live device may be written: an id match, a legacy name
 /// match (no id was stored and the name was found), or a miss where the name
@@ -572,7 +562,8 @@ impl RigWerkApp {
     }
 
     /// The person chose this low-latency input, or a session found it.
-    /// Later saves may write that identity. A silent fallback does not call this.
+    /// Later saves may write that identity.  A silent fallback does
+    /// not call this.
     pub(crate) fn accept_asio_device(&mut self) {
         self.devices.asio_held = None;
     }
@@ -821,7 +812,8 @@ impl RigWerkApp {
         let scan_notes = fresh.notes.clone();
         self.hold_unconfirmed_devices(&mut fresh);
         if inventory_fingerprint(&fresh) == self.devices.inventory_fingerprint {
-            // Same devices. A scan can still fail, and that note has to be kept.
+            // Same devices.  A scan can still fail, and that note has to
+            // be kept.
             if self.devices.inventory.notes != scan_notes {
                 self.devices.inventory.notes = scan_notes.clone();
             }

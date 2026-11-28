@@ -1,10 +1,8 @@
-//! The allocation guard over a running mixer: NAM blocks, and the edits the
-//! console makes to them, must not allocate on the audio thread, and must
-//! not free there either: a model the callback dropped is a free.
+//! NAM edits must not allocate or free on the audio thread.  Dropping
+//! a model there is a free.
 //!
-//! The UI side of an edit runs on this same test thread, so each block is
-//! rendered inside its own guard: what the edit allocates is the UI's
-//! business, what the block allocates is not.
+//! Each block has its own guard.  What the edit allocates is the UI
+//! thread.
 
 use super::super::nam::{
     prepare_nam_json, prepare_nam_json_at, NamBlockControls, NamFile, NamPosition, NamStack,
@@ -73,11 +71,8 @@ fn running_mixer(frames: usize) -> (OutputMixer, Shared) {
     (mixer, shared)
 }
 
-/// Renders one block into a buffer the caller already owns, and asserts that
-/// the block allocated and freed nothing.  The buffer is outside the guard: writing a
-/// test's own output is not the audio thread's allocation.  A release build
-/// counts nothing, so the two reads below are 0 == 0 there: the zeros are
-/// evidence in a debug test run.
+/// The buffer is outside the guard.  A release build counts nothing,
+/// so the reads below are 0 == 0 there.
 fn render_one_block(mixer: &mut OutputMixer, shared: &Shared, frames: usize, out: &mut [Vec<f32>]) {
     let guard = RtGuard::enter();
     mixer.render(shared, frames, |index, mapped| {
@@ -162,10 +157,8 @@ fn adding_removing_and_reordering_nam_blocks_allocates_nothing() {
         }
     });
 
-    // Add a block, move it, bypass it, move one after the effects, remove
-    // one: every edit the console can make, with the audio running.  The
-    // edits themselves are the UI thread's work, so only the render that
-    // follows each one is counted.
+    // The edits are the UI thread.  Only the render after each one is
+    // counted.
     let mut grown = stack(&[0, 1, 2]);
     shared.path(0).set_nam(&grown);
     shared.path(0).queue_nam(2, model());

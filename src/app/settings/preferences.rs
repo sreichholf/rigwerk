@@ -1,5 +1,3 @@
-//! Launch preferences, extra output prefs, bridge settings and load/store.
-
 use serde::de::IgnoredAny;
 use serde::Deserialize;
 
@@ -19,44 +17,30 @@ use crate::audio::{
     SEND_OFF_DB, VIRTUAL_OUTPUT_ID, VIRTUAL_OUTPUT_NAME,
 };
 
-/// 2: signal paths (`paths`, per-device `path_map`); layout 1 files load
-/// as one path.
+/// Layout 1 files have no `paths` and load as one path.
 pub(crate) const PREFERENCES_SCHEMA: u32 = 2;
 
-/// Launch preferences that survive restarts.  The bridge stays stopped unless
-/// the person explicitly asks for it to start with the app.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(crate) struct Preferences {
-    /// See [`PREFERENCES_SCHEMA`]; missing (older saves) reads as 0.  A save
-    /// always writes this build's number: a file from a newer build is read
-    /// but never saved over while its layout number is readable (see
-    /// [`load_preferences`]).
+    /// Missing reads as 0.  A newer file is read and never written over.
     #[serde(default)]
     pub(crate) schema_version: u32,
     pub(crate) auto_start_bridge: bool,
-    /// A saved session that cannot be read is skipped, not fatal.
     #[serde(deserialize_with = "skip_unreadable")]
     pub(crate) sessions: Vec<Session>,
     pub(crate) session_name: String,
-    /// The page that was open when the app was last used.
     pub(crate) page: String,
-    /// Which of the two EQs was last edited: 0 pre, 1 post.
+    /// 0 pre, 1 post.
     pub(crate) eq_edit: u8,
-    /// Whether the output list was showing the low-latency tab.
     pub(crate) output_tab_low_latency: bool,
-    /// The session that was selected in the Sessions list.
     pub(crate) selected_session: Option<usize>,
-    /// That session's name.  The load skips an unreadable session and drops a
-    /// duplicate name before the index is used, so either can move it to
-    /// another session; the name is what the choice follows.  Missing on
-    /// older saves, which fall back to the index.
+    /// The name is what the choice follows: a skipped session moves the
+    /// index.  An older save falls back to the index.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) selected_session_name: Option<String>,
-    /// Selected devices. `*_id` is [`crate::audio::DeviceItem::id`] (cpal's
-    /// `DeviceId` text, or `asio:{clsid}` / `asio-out:{clsid}`) and
-    /// `*_backend` is that item's backend. The name is only the display
-    /// fallback. Saves from before ids existed leave the id and backend empty.
+    /// An empty id and backend are a save from before ids.  The name is
+    /// only the display fallback.
     pub(crate) asio_name: Option<String>,
     pub(crate) asio_id: String,
     pub(crate) asio_backend: String,
@@ -72,30 +56,24 @@ pub(crate) struct Preferences {
     pub(crate) input_gain: f32,
     pub(crate) output_gain: f32,
     pub(crate) input_channels: [bool; 2],
-    /// Files from before paths existed: path 1's settings.  Read, never
-    /// written (see [`Self::paths`]).
+    /// Path 1 from a file with no `paths`.  Read only.
     #[serde(skip_serializing)]
     pub(crate) output_channels: [bool; 2],
-    /// Files from before paths existed: path 1's settings.  Read, never
-    /// written (see [`Self::paths`]).
+    /// Path 1 from a file with no `paths`.  Read only.
     #[serde(skip_serializing)]
     pub(crate) mono: bool,
-    /// The master mute.
     pub(crate) mute: bool,
     pub(crate) drift: bool,
-    /// Linux low-latency output, and the pre-exclusive Windows REAL-style
-    /// switch.  Kept so older saves and Linux prefs round-trip.  On Windows
-    /// the authoritative choice is [`Self::wasapi_output_mode`].
+    /// Older saves and Linux round-trip through this.  On Windows
+    /// [`Self::wasapi_output_mode`] is the choice.
     pub(crate) low_latency_output: bool,
-    /// Windows WASAPI clock mode.  Missing on older saves → derived from
-    /// [`Self::low_latency_output`] in [`sanitize_preferences`].
+    /// Missing on an older save: derived from [`Self::low_latency_output`].
     #[serde(default)]
     pub(crate) wasapi_output_mode: Option<WasapiOutputMode>,
-    /// Files from before paths existed: path 1's settings.  Read, never
-    /// written (see [`Self::paths`]).
+    /// Path 1 from a file with no `paths`.  Read only.
     #[serde(skip_serializing)]
     pub(crate) routes: [[bool; 4]; 2],
-    /// Output side rate; 0 follows the input.
+    /// 0 follows the input.
     pub(crate) output_rate: u32,
     pub(crate) output_buffer: usize,
     /// Bridge buffer: 0 Auto, 1 Minimum, 2 Fixed (size in `bridge_buffer_ms`).
@@ -103,58 +81,36 @@ pub(crate) struct Preferences {
     pub(crate) bridge_buffer_mode: u8,
     #[serde(rename = "cushion_ms")]
     pub(crate) bridge_buffer_ms: f32,
-    /// Path 1's EQ before the plugin effects in files from before paths
-    /// existed (saves from before there were two EQs load into this one).
-    /// Read, never written.
+    /// Path 1's pre-EQ from a file with no `paths`.  A one-EQ save loads here.
     #[serde(skip_serializing)]
     pub(crate) eq: EqSettings,
-    /// Path 1's EQ after the effects, in files from before paths.
+    /// Path 1 from a file with no `paths`.  Read only.
     #[serde(skip_serializing)]
     pub(crate) eq_post: EqSettings,
-    /// Path 1's gate, in files from before paths.
+    /// Path 1 from a file with no `paths`.  Read only.
     #[serde(default, skip_serializing)]
     pub(crate) gate: GateSettings,
-    /// Path 1's effect chain, in files from before paths.  An entry that
-    /// cannot be read is skipped, not fatal.
+    /// Path 1's chain from a file with no `paths`.  Read only.
     #[serde(deserialize_with = "skip_unreadable", skip_serializing)]
     pub(crate) plugins: Vec<PluginPref>,
-    /// The signal paths, in order.  Files from before paths existed have
-    /// none: their top-level mix fields load as path 1 (see
-    /// [`Self::path_prefs`]).  New files write only this.
-    ///
-    /// A path that cannot be read keeps its slot as a muted “Unreadable path
-    /// N” with every send off: the slot is silent, and so is a send that
-    /// pointed at it.  The list does not renumber.  The routing records
-    /// beside this field are positional too and are repaired in place: a
-    /// device's row that cannot be read stays off in its slot (nothing
-    /// routed, at the level floor), and a send that cannot be read stays off
-    /// at its index, so no other path's route or send moves.  The load
-    /// reports the replacements that keep a slot; one past a cap is dropped
-    /// deliberately and is not reported.
+    /// A file with none loads its top-level mix fields as path 1.  An
+    /// unreadable path, device row or send keeps its slot, so nothing
+    /// after it moves.  One past a cap is dropped and not reported.
     #[serde(deserialize_with = "placeholder_unreadable")]
     pub(crate) paths: Vec<PathPref>,
-    /// The path the console, sheets and browser edit (a position in `paths`).
     pub(crate) selected_path: usize,
-    /// The Match paths reference and target.  Missing on older saves: the
-    /// target at -18 LUFS, matching the target.
+    /// Missing on an older save: the reference matches the target.
     #[serde(default, skip_serializing_if = "crate::app::match_paths::is_default")]
     pub(crate) match_paths: crate::app::match_paths::MatchPathsSettings,
-    /// Level, mute and channel map of the clock output (`output_id`).
     #[serde(rename = "clock_device")]
     pub(crate) clock_output: OutputDeviceSettings,
-    /// Extra output devices.  An entry that cannot be read is skipped.
     #[serde(deserialize_with = "skip_unreadable", rename = "followers")]
     pub(crate) extra_outputs: Vec<ExtraOutputPref>,
-    /// The last measured loopback, with the input, output, rates, buffers
-    /// and output mode it was made under.  Missing on older saves; an entry
-    /// that cannot be read is treated as missing (the app re-measures).
     #[serde(default, deserialize_with = "skip_unreadable_option")]
     pub(crate) measured_latency: Option<MeasuredLatency>,
-    /// Tuner preset id, or
-    /// [`DEFAULT_PRESET_ID`](crate::audio::DEFAULT_PRESET_ID) for chromatic.
     /// An unknown id falls back to chromatic.
     pub(crate) tuner_tuning: String,
-    /// A4 in Hz, inside the 415–466 the page offers.
+    /// A4 in Hz, clamped to 415–466.
     pub(crate) tuner_reference_hz: f32,
     /// 0 sum, 1 left, 2 right.
     pub(crate) tuner_channel: u8,
@@ -162,69 +118,47 @@ pub(crate) struct Preferences {
     pub(crate) tuner_display: u8,
     /// 0 single note, 1 all strings.
     pub(crate) tuner_listen: u8,
-    /// Mute the bridge output while the tuner page is open.
     pub(crate) tuner_auto_mute: bool,
-    /// 0 tight, 1 standard, 2 live; the labels carry the cent values.
+    /// 0 tight, 1 standard, 2 live.
     pub(crate) tuner_tolerance: u8,
-    /// Directory takes are written into.  Empty is replaced with the default
-    /// recordings folder by [`sanitize_preferences`].  The writer creates it.
+    /// Empty is replaced with the default recordings folder.
     #[serde(default)]
     pub(crate) record_folder: String,
-    /// Folder of `.nam` captures the NAM sheet lists.  Empty until set.
-    /// Missing on older saves.  Not written while empty, so those saves
-    /// stay byte-identical.
+    /// Not written while empty, so an older save stays byte-identical.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) amp_folder: String,
-    /// Folder of `.wav` impulse responses the cab sheet lists.  Empty
-    /// until set.  Missing on older saves.  Not written while empty.
+    /// Not written while empty, so an older save stays byte-identical.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) cab_folder: String,
-    /// Whether takes carry the metronome tick and the calibration click.
-    /// Off: a take is the output without them.
     #[serde(default)]
     pub(crate) record_click: bool,
-    /// Metronome transport.  Not part of a session: applying one does not
-    /// start, stop or retune the click.  Missing fields take the defaults
-    /// below (off, 120 BPM, 4/4, −12 dB).  `metronome_running` is neither
-    /// saved nor read: a launch always starts the click stopped, and an old
-    /// file that still carries the field loads (unknown fields are ignored).
+    /// Not part of a session, and not saved.  A launch starts the
+    /// click stopped.
     #[serde(skip)]
     pub(crate) metronome_running: bool,
     pub(crate) metronome_bpm: f32,
     pub(crate) metronome_rhythm: crate::audio::ClickRhythm,
     pub(crate) metronome_level_db: f32,
-    /// System, Dark or Light.  Missing on older saves → System.
     #[serde(default)]
     pub(crate) theme: ThemeChoice,
-    /// The interface size, egui's zoom factor: 0.8–1.5, clamped in
-    /// [`sanitize_preferences`].  Missing on older saves → 1.0.
+    /// Clamped in [`sanitize_preferences`].
     #[serde(default = "default_ui_size")]
     pub(crate) ui_size: f32,
-    /// Effects the browser keeps starred.  Empty is not written.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) effect_favourites: Vec<EffectId>,
-    /// The last effects added from the browser, newest last.  Empty is
-    /// not written.  [`sanitize_preferences`] keeps ten.
+    /// [`sanitize_preferences`] keeps ten.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) effect_recent: Vec<EffectId>,
-    /// Bottom sheet height in points.  0 means 40 % of the console area.
-    /// Missing on older saves, and omitted while it is still the default.
+    /// 0 means 40% of the console area.
     #[serde(default, skip_serializing_if = "sheet_height_unset")]
     pub(crate) sheet_height: f32,
-    /// What a double-click on an effect opens.  Missing on older saves, and
-    /// omitted while it is still the editor.  Not the dropped
-    /// `prefer_plugin_interface` key.
     #[serde(default, skip_serializing_if = "effect_open_is_editor")]
     pub(crate) effect_double_click: EffectOpen,
-    /// The metronome channels an output had when its *Metronome* toggle
-    /// was last switched off; switching one on restores them where they
-    /// fit.  Missing on older saves, and omitted while unused (0).
+    /// Restored when an output's Metronome toggle is switched back on.
     #[serde(default, skip_serializing_if = "click_mask_unused")]
     pub(crate) last_click_mask: u8,
 }
 
-/// What a double-click on an effect opens.  An unknown value reads as the
-/// editor, which is also the default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum EffectOpen {
     Controls,
@@ -324,8 +258,7 @@ impl Default for Preferences {
 }
 
 impl Preferences {
-    /// The saved paths, or, for a file from before paths existed, one path
-    /// made from its top-level mix fields.
+    /// A file with no `paths` becomes one path from its top-level mix fields.
     pub(crate) fn path_prefs(&self) -> Vec<PathPref> {
         if !self.paths.is_empty() {
             return self.paths.clone();
@@ -354,8 +287,7 @@ impl Preferences {
         }]
     }
 
-    /// Moves a file from before paths onto `paths`, and clears the legacy
-    /// fields so nothing reads them by mistake.
+    /// Clears the top-level mix fields so nothing reads them by mistake.
     pub(crate) fn migrate_paths(&mut self) {
         self.paths = self.path_prefs();
         let legacy = Self::default();
@@ -385,30 +317,26 @@ pub(crate) fn bridge_buffer_to_pref(mode: BufferMode) -> u8 {
     }
 }
 
-/// An extra output device that plays the finished mix.  On PipeWire it is a
-/// sink linked from the duplex/native node; [`Self::virtual_output`] is the
-/// RigWerk Out source other apps capture.  It is never the clock output.
+/// Never the clock output.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(crate) struct ExtraOutputPref {
-    /// [`crate::audio::DeviceItem::id`] and its backend; the name is only the
-    /// display fallback.  PipeWire RigWerk Out uses [`VIRTUAL_OUTPUT_ID`];
-    /// on Windows the VB-Cable virtual output keeps the WASAPI render id.
+    /// PipeWire RigWerk Out uses [`VIRTUAL_OUTPUT_ID`].  On Windows the
+    /// VB-Cable keeps the WASAPI render id.
     pub(crate) id: String,
     pub(crate) backend: String,
     pub(crate) name: String,
     pub(crate) settings: OutputDeviceSettings,
-    /// Bridge buffer: 0 Auto, 1 Minimum, 2 Fixed (size in `bridge_buffer_ms`).
-    /// Unused on PipeWire extra outputs (the graph keeps them in step).
+    /// 0 Auto, 1 Minimum, 2 Fixed.  Unused on PipeWire: the graph keeps
+    /// them in step.
     #[serde(rename = "cushion_mode")]
     pub(crate) bridge_buffer_mode: u8,
     #[serde(rename = "cushion_ms")]
     pub(crate) bridge_buffer_ms: f32,
-    /// This entry is the virtual output (RigWerk Out), not a device.
+    /// RigWerk Out, not a hardware device.
     #[serde(rename = "virtual_out")]
     pub(crate) virtual_output: bool,
-    /// Whether the virtual output is on (advertised).  Ignored for hardware
-    /// extra outputs.  Missing on old saves → off.
+    /// Ignored for a hardware extra output.  Missing on an old save is off.
     #[serde(rename = "publish")]
     pub(crate) virtual_output_on: bool,
 }
@@ -429,7 +357,6 @@ impl Default for ExtraOutputPref {
 }
 
 impl ExtraOutputPref {
-    /// A new RigWerk Out extra output, switched on.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn virtual_output() -> Self {
         Self {
@@ -450,11 +377,10 @@ impl ExtraOutputPref {
         if self.virtual_output {
             #[cfg(target_os = "windows")]
             {
-                // VB-Cable virtual output: keep the WASAPI render id.  Rewriting to
-                // the PipeWire sentinel would stop the supervisor opening it
-                // after preference load or session apply.  Drop the sentinel
-                // from older / cross-platform saves; inventory rematch fills
-                // the live WASAPI id.
+                // Keep the WASAPI render id.  Rewriting it to the PipeWire
+                // sentinel would stop the supervisor opening the cable.
+                // A sentinel from an older save is cleared; rematch fills
+                // the live id.
                 if self.id == VIRTUAL_OUTPUT_ID {
                     self.id.clear();
                 }
@@ -495,11 +421,8 @@ fn sanitize_extra_outputs(extra_outputs: &mut Vec<ExtraOutputPref>) {
     }
 }
 
-/// Bind the Windows VB-Cable virtual output to the live WASAPI render id.
-///
-/// Older saves and cross-platform sessions may still carry
-/// [`VIRTUAL_OUTPUT_ID`]; a missing or non-WASAPI id also needs a rematch when
-/// CABLE Input is present.
+/// An older save may still carry [`VIRTUAL_OUTPUT_ID`].  A missing or
+/// non-WASAPI id is rematched when CABLE Input is present.
 pub(crate) fn rematch_windows_virtual_output(
     extra_outputs: &mut [ExtraOutputPref],
     outputs: &[DeviceItem],
@@ -510,8 +433,8 @@ pub(crate) fn rematch_windows_virtual_output(
             if !extra_output.virtual_output {
                 continue;
             }
-            // The virtual output stays on id equality: a name or backend match
-            // would hide the missing id the Windows cable rebind has to see.
+            // Id equality only.  A name or backend match would hide the
+            // missing id this rebind has to see.
             let present = outputs.iter().any(|device| device.id == extra_output.id);
             let stale = extra_output.id.is_empty()
                 || extra_output.id == VIRTUAL_OUTPUT_ID
@@ -539,53 +462,40 @@ pub(crate) fn rematch_windows_virtual_output(
     }
 }
 
-/// Rates offered on either side of the bridge.
 pub(crate) const RATES: [u32; 4] = [44_100, 48_000, 88_200, 96_000];
 
-/// Buffer sizes offered on either side of the bridge, in samples.
 pub(crate) const BUFFERS: [usize; 5] = [32, 64, 128, 256, 512];
 
-/// The rate a bad or missing input rate is replaced with. It is one of [`RATES`].
 pub(crate) const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 
-/// The buffer a bad size is replaced with. It is one of [`BUFFERS`].
 pub(crate) const DEFAULT_BUFFER: usize = 128;
 
-/// Smallest output step that is still usable. The bridge used to raise
-/// anything smaller with `output_buffer.max(16)`; that floor lives here now.
 pub(crate) const MIN_OUTPUT_BUFFER: usize = 16;
 
-/// Largest buffer kept when it is not one of [`BUFFERS`]. Equal to the last
-/// offered size, so a corrupt huge value is not asked of the device.
+/// A size outside [`BUFFERS`] is kept only up to this, so a corrupt value
+/// is not asked of the device.
 pub(crate) const MAX_SANE_BUFFER: usize = 512;
 
-/// Input fader, in dB. The console strip and the fader use this range.
 pub(crate) const INPUT_GAIN_MIN_DB: f32 = -24.0;
 pub(crate) const INPUT_GAIN_MAX_DB: f32 = 18.0;
-/// Output fader, in dB. Same range as the console output faders.
 pub(crate) const OUTPUT_GAIN_MIN_DB: f32 = -36.0;
 pub(crate) const OUTPUT_GAIN_MAX_DB: f32 = 6.0;
 
-/// What a missing or non-finite gain becomes before it is clamped.
 pub(crate) const DEFAULT_INPUT_GAIN: f32 = 0.0;
 pub(crate) const DEFAULT_OUTPUT_GAIN: f32 = -1.5;
 
-/// Fixed bridge buffer slider, in milliseconds. Same ends as the Live card.
 pub(crate) const BRIDGE_BUFFER_MS_MIN: f32 = 1.0;
 pub(crate) const BRIDGE_BUFFER_MS_MAX: f32 = 40.0;
 pub(crate) const DEFAULT_BRIDGE_BUFFER_MS: f32 = 10.0;
 
-/// How a stored `output_buffer` of 0 is read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OutputBufferZero {
-    /// Preferences never used 0 as a sentinel. It is not a buffer size.
+    /// Preferences never stored 0.  It is not a buffer size.
     Invalid,
-    /// Sessions saved before the output side existed stored 0 to mean
-    /// "use the input buffer".
+    /// An old session stored 0 to mean the input buffer.
     FollowInput,
 }
 
-/// The numbers that must be safe before they reach the bridge or `10^(dB/20)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct BridgeSettings {
     pub(crate) sample_rate: u32,
@@ -598,25 +508,8 @@ pub(crate) struct BridgeSettings {
     pub(crate) bridge_buffer_ms: f32,
 }
 
-/// One check for saved preferences and for applying a session.
-///
-/// Gains that are NaN become the ordinary defaults, then every gain is
-/// clamped to the fader range. ±infinity lands on the nearer end, so the
-/// value passed to `10^(dB/20)` is always finite.
-///
-/// `sample_rate` must be one of [`RATES`]; anything else becomes 48 kHz.
-/// `output_rate` may be 0 (match the input) or one of [`RATES`]; anything
-/// else becomes 48 kHz.
-///
-/// A buffer in [`BUFFERS`] is kept. Any other size is kept only when it is
-/// at least [`MIN_OUTPUT_BUFFER`] and no larger than [`MAX_SANE_BUFFER`]
-/// (a positive step the output path already allowed, up to the biggest
-/// offered size). Anything else becomes [`DEFAULT_BUFFER`] and is not
-/// applied raw. With [`OutputBufferZero::FollowInput`], a 0 output buffer
-/// stays 0 so the caller can substitute the input buffer.
-///
-/// A NaN bridge buffer becomes 10 ms. ±infinity is clamped to the fixed slider
-/// (1–40 ms).
+/// NaN becomes the default.  ±infinity clamps, so `10^(dB/20)` stays
+/// finite.  A 0 output buffer stays 0 for [`OutputBufferZero::FollowInput`].
 pub(crate) fn validate_bridge_settings(
     settings: BridgeSettings,
     output_buffer_zero: OutputBufferZero,
@@ -645,24 +538,18 @@ pub(crate) fn validate_bridge_settings(
     }
 }
 
-/// A live input-rate edit, checked the way a saved one is: a rate not in
-/// [`RATES`] becomes [`DEFAULT_SAMPLE_RATE`].
 pub(crate) fn sanitize_sample_rate(rate: u32) -> u32 {
     known_rate(rate, false)
 }
 
-/// A live clock-output-rate edit; 0 still means "match the input".
 pub(crate) fn sanitize_output_rate(rate: u32) -> u32 {
     known_rate(rate, true)
 }
 
-/// A live buffer edit, checked the way a saved one is.
 pub(crate) fn sanitize_buffer_size(buffer: usize) -> usize {
     known_buffer(buffer, false)
 }
 
-/// A live fixed bridge-buffer edit: NaN becomes the default, the rest is
-/// clamped to the slider range.
 pub(crate) fn sanitize_bridge_buffer_ms(ms: f32) -> f32 {
     finite_bridge_buffer(ms)
 }
@@ -727,11 +614,7 @@ fn write_bridge_settings(preferences: &mut Preferences, settings: BridgeSettings
     preferences.bridge_buffer_ms = settings.bridge_buffer_ms;
 }
 
-/// Checks the preference numbers and every saved session. Called from
-/// [`load_preferences`]; applying a session checks again.
-///
-/// The tuner's A4 reference is clamped to the range the page offers, and a
-/// NaN becomes 440 Hz, so the pitch maths never sees it.
+/// A NaN A4 becomes 440 Hz, so the pitch maths never sees it.
 pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
     let settings = validate_bridge_settings(
         bridge_settings_from_preferences(preferences),
@@ -748,9 +631,8 @@ pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
         crate::app::record::resolved_record_folder(&preferences.record_folder);
     preferences.amp_folder = crate::app::nam::normalize_models_folder(&preferences.amp_folder);
     preferences.cab_folder = crate::app::nam::normalize_models_folder(&preferences.cab_folder);
-    // Tempo and level are clamped here.  The app setters clamp a live edit
-    // the same way; the engine stores those values as they are.  A loaded
-    // rhythm is already a real bar (`ClickRhythm`'s serde other is 4/4).
+    // The engine stores these as they are.  A loaded rhythm is already a
+    // real bar (`ClickRhythm`'s serde other is 4/4).
     preferences.metronome_bpm = crate::audio::clamp_metronome_bpm(preferences.metronome_bpm);
     preferences.metronome_level_db =
         crate::audio::clamp_click_level_db(preferences.metronome_level_db);
@@ -771,8 +653,7 @@ pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
     preferences.match_paths = preferences.match_paths.sanitized();
     preferences.clock_output = preferences.clock_output.sanitized();
     sanitize_extra_outputs(&mut preferences.extra_outputs);
-    // A measurement that cannot describe a real path is dropped; the app
-    // then asks for a new one instead of showing a number that never was.
+    // A measurement that cannot describe a real path is dropped.
     preferences.measured_latency = preferences
         .measured_latency
         .take()
@@ -783,7 +664,7 @@ pub(crate) fn sanitize_preferences(preferences: &mut Preferences) {
     }
 }
 
-/// Fills a missing Windows mode from the legacy bool (`true` → REAL-style).
+/// A missing mode comes from `low_latency_output` (`true` is REAL-style).
 pub(crate) fn migrate_wasapi_output_mode(
     mode: &mut Option<WasapiOutputMode>,
     low_latency_output: bool,
@@ -793,7 +674,6 @@ pub(crate) fn migrate_wasapi_output_mode(
     }
 }
 
-/// The mode to apply on Windows after load / sanitize.
 pub(crate) fn resolved_wasapi_output_mode(preferences: &Preferences) -> WasapiOutputMode {
     preferences
         .wasapi_output_mode
@@ -837,7 +717,6 @@ pub(crate) fn sanitize_session(session: &mut Session) {
     session.clock_output = session.clock_output.sanitized();
     sanitize_extra_outputs(&mut session.extra_outputs);
 }
-/// A sample rate as people read it: `48 kHz`, `44.1 kHz`.
 pub(crate) fn rate_label(rate: u32) -> String {
     if rate.is_multiple_of(1000) {
         format!("{} kHz", rate / 1000)
@@ -848,8 +727,7 @@ pub(crate) fn rate_label(rate: u32) -> String {
 
 pub(crate) const PREFERENCES_KEY: &str = "rigwerk-preferences";
 
-/// Pages are stored by name so the saved preferences stay readable and keep
-/// working when pages are added or reordered.
+/// Stored by name, so adding or reordering pages does not move a save.
 pub(crate) fn page_key(page: Page) -> &'static str {
     match page {
         Page::Console => "console",
@@ -862,45 +740,38 @@ pub(crate) fn page_from_key(key: &str) -> Page {
     match key.trim().to_lowercase().as_str() {
         "tuner" => Page::Tuner,
         "setup" | "devices" | "guide" => Page::Setup,
-        // The console replaces Live, Mixer, Routing and Plugins, and the
-        // old Sessions and Diagnostics pages are its menu and its sheet.  A
-        // key from a newer build opens it too.  An old build reading
-        // `console` or `setup` falls back to Live.
+        // Old page names, and a key this build does not know, open the
+        // console.  `console` and `setup` stay, so an older build still
+        // has a page to open.
         _ => Page::Console,
     }
 }
-/// How many entries the stored lists held, readable or not, so a loss can be
-/// reported.
+/// Counts every stored entry, readable or not, so a loss can be reported.
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct StoredCounts {
     sessions: Vec<IgnoredAny>,
     plugins: Vec<IgnoredAny>,
     followers: Vec<IgnoredAny>,
-    /// A path that cannot be read contributes no effects; the other paths'
-    /// counts still count.
+    /// An unreadable path contributes no effects.  The others still count.
     #[serde(deserialize_with = "skip_unreadable")]
     paths: Vec<StoredPathCounts>,
-    /// Present when a measurement was stored, readable or not.
+    /// Set when a measurement was stored, readable or not.
     measured_latency: Option<IgnoredAny>,
 }
 
-/// How many effects one stored path held.
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct StoredPathCounts {
     plugins: Vec<IgnoredAny>,
 }
 
-/// The marker name [`placeholder_unreadable`] writes on a path it replaced.
-/// No path RigWerk writes carries it, and it lives only between the parse and
-/// the scan in [`load_preferences`], which renames the path for its position.
+/// No path this build writes carries it.  It lives only until
+/// [`load_preferences`] renames the slot for its position.
 const UNREADABLE_PATH_SENTINEL: &str = "\u{0}unreadable path";
 
-/// Names each replaced path for its saved position and returns how many there
-/// were.  The top-level list and every session's list use the same marker.
-/// Only lists the load kept are scanned, and only after the cap ran, so a
-/// path that was dropped is not reported as kept.
+/// Only lists the load kept, after the cap, so a dropped path is not
+/// reported as kept.
 fn name_unreadable_paths(paths: &mut [PathPref]) -> usize {
     let mut replaced = 0;
     for (position, path) in paths.iter_mut().enumerate() {
@@ -912,9 +783,7 @@ fn name_unreadable_paths(paths: &mut [PathPref]) -> usize {
     replaced
 }
 
-/// Counts and clears the load's marker on each routing row of one device.
-/// Only devices the load kept are walked, and the row array is already capped,
-/// so neither a dropped container nor a row past the cap is reported.
+/// A dropped device, or a row past the cap, is not reported.
 fn take_unreadable_rows(settings: &mut OutputDeviceSettings) -> usize {
     let mut replaced = 0;
     for row in &mut settings.path_map {
@@ -926,10 +795,8 @@ fn take_unreadable_rows(settings: &mut OutputDeviceSettings) -> usize {
     replaced
 }
 
-/// The replaced sends of one path that still have a slot after the clamp site.
-/// That site clears a return's sends and drops a list whose every level is
-/// off, and sends past [`MAX_PATHS`] are truncated, so none of those keep a
-/// position.
+/// A return's sends, an all-off list, and sends past [`MAX_PATHS`] keep
+/// no position, so they are not counted.
 fn count_replaced_sends(path: &PathPref) -> usize {
     if path.feed == PathFeed::Sends {
         return 0;
@@ -950,17 +817,14 @@ fn count_replaced_sends(path: &PathPref) -> usize {
     }
 }
 
-/// The replaced sends across one path list, capped like the load caps it.
 fn count_replaced_sends_in(paths: &[PathPref]) -> usize {
     paths.iter().take(MAX_PATHS).map(count_replaced_sends).sum()
 }
 
 impl Placeholder for PathPref {
-    /// Muted, with the default's every send off: a live default path would be
-    /// a doubled copy of the input where a damaged path used to be, and a
-    /// return would come back as an input.  The name marks the slot for the
-    /// load and is replaced before anything reads it.  Session path lists use
-    /// the same value.
+    /// Muted, with every send off: a live default would double the input,
+    /// and a return would come back as an input.  The name is replaced
+    /// before anything reads it.
     fn placeholder() -> Self {
         Self {
             name: UNREADABLE_PATH_SENTINEL.to_owned(),
@@ -970,8 +834,6 @@ impl Placeholder for PathPref {
     }
 }
 
-/// "1 saved session(s) and 2 plugin effect(s)": only the lists that lost
-/// entries, or `None` when nothing was skipped.
 fn skipped_summary(
     sessions: usize,
     plugins: usize,
@@ -995,40 +857,25 @@ fn skipped_summary(
     }
 }
 
-/// The outcome of reading the stored preferences.
 pub(crate) struct LoadedPreferences {
-    /// `None` when nothing was stored or the text could not be read at all.
+    /// `None` when nothing was stored, or the text could not be read at all.
     pub(crate) preferences: Option<Preferences>,
-    /// `(key, original text)` to keep under [`PREFERENCES_BACKUP_KEY`] at the
-    /// start of the next save, set whenever a save would lose something that
-    /// was stored: an unreadable file, skipped or replaced entries, or a file
-    /// from a newer build (which is never overwritten).
+    /// Original text to keep when a save would drop something that was
+    /// stored, including a newer build's file, which is never overwritten.
     pub(crate) backup: Option<(String, String)>,
-    /// The layout number the stored file declared.  Above
-    /// [`PREFERENCES_SCHEMA`] a newer build wrote it, so the app writes the
-    /// backup and never the primary for the rest of the session.
+    /// Above [`PREFERENCES_SCHEMA`], a newer build wrote the file, so this
+    /// session writes the backup and never the primary.
     pub(crate) stored_schema_version: u32,
-    /// What went wrong, for the app log.
     pub(crate) notices: Vec<String>,
 }
 
-/// The one key a copy of settings that could not be read whole is kept under.
-/// eframe storage cannot list its keys, so a key per load would leave every
-/// damaged load's full text behind with nothing able to prune it.  A later
-/// damaged load overwrites this copy: it is one backup, not a history.
+/// eframe cannot list its keys, so one backup is overwritten rather than
+/// leaving every damaged load behind.
 pub(crate) const PREFERENCES_BACKUP_KEY: &str = "rigwerk-preferences-backup";
 
-/// Parses the stored preferences (eframe keeps them as RON), tolerating
-/// damaged entries.  Never loses data silently: whatever the next save would
-/// drop is returned as a backup together with a notice for the log.
-///
-/// `backup_key` is where [`store_preferences_backup`] writes that copy; the
-/// app passes [`PREFERENCES_BACKUP_KEY`].
-///
-/// A file from a newer build is read through the field defaults and left
-/// alone: its layout number is returned beside it, and the app then saves
-/// only the copy.  The value here always carries this build's number, so a
-/// migration keyed on it is never told it is looking at a newer layout.
+/// Whatever the next save would drop comes back as a backup.  A newer
+/// file is read through field defaults; the value here carries this
+/// build's number, so a migration is never told it is a newer layout.
 pub(crate) fn load_preferences(raw: Option<&str>, backup_key: &str) -> LoadedPreferences {
     let Some(raw) = raw else {
         return LoadedPreferences {
@@ -1054,26 +901,23 @@ pub(crate) fn load_preferences(raw: Option<&str>, backup_key: &str) -> LoadedPre
         }
     };
     let mut notices = Vec::new();
-    // The stored file's number is kept beside the value; the value itself is
-    // this build's from here on, so a migration keyed on it is never told it
-    // is looking at a newer layout.
+    // The value carries this build's number from here on.  The stored
+    // number stays beside it.
     let stored_schema_version = preferences.schema_version;
     preferences.schema_version = PREFERENCES_SCHEMA;
-    // The counts are a separate read of the same text; it only reports lists
-    // that lost entries.  A failed read is not treated as "nothing lost": the
-    // original text is kept when the counts cannot vouch for it.
+    // A failed count is not "nothing lost": the original text is kept
+    // when the counts cannot vouch for it.
     let counts = ron::from_str::<StoredCounts>(raw);
     let counts_unreadable = counts.is_err();
     let counts = counts.unwrap_or_default();
-    // Sends are replaced in place by a marker the clamp site turns into "off",
-    // so they are counted here, before sanitizing, over the path lists the
-    // load actually kept.  A session dropped above is not in `sessions`.
+    // Counted before sanitizing.  A dropped session is no longer in
+    // `sessions`, and the clamp turns the marker into off.
     let mut replaced_sends = count_replaced_sends_in(&preferences.paths);
     for session in &preferences.sessions {
         replaced_sends += count_replaced_sends_in(&session.paths);
     }
-    // List lengths before sanitizing: an extra output the cap drops is not an
-    // unreadable entry, and the duplicate virtual out is dropped on purpose.
+    // Before sanitizing: a cap drop, and a duplicate virtual output, are
+    // not unreadable entries.
     let sessions_loaded = preferences.sessions.len();
     let plugins_loaded = preferences.plugins.len()
         + preferences
@@ -1082,19 +926,14 @@ pub(crate) fn load_preferences(raw: Option<&str>, backup_key: &str) -> LoadedPre
             .map(|path| path.plugins.len())
             .sum::<usize>();
     let extra_outputs_loaded = preferences.extra_outputs.len();
-    // Sanitizing can still drop a measurement that parsed but cannot describe
-    // a real path; the measurement notice is counted after it runs.
+    // Sanitizing can still drop a measurement that parsed.
     sanitize_preferences(&mut preferences);
-    // The path markers survive sanitizing, so the scan runs after it: paths
-    // past the cap are gone and must not be reported as kept.  A session's
-    // path list is read the same way, and only loaded sessions are left.
+    // After the cap, so a path past it is not reported as kept.
     let mut replaced_paths = name_unreadable_paths(&mut preferences.paths);
     for session in &mut preferences.sessions {
         replaced_paths += name_unreadable_paths(&mut session.paths);
     }
-    // Routing rows carry the load's marker until this point.  Walking the kept
-    // devices after sanitizing counts only rows that still have a position: a
-    // row in a dropped session or extra output, or past the caps, is gone.
+    // After sanitizing, so a row in a dropped device or past the cap is gone.
     let mut replaced_routes = take_unreadable_rows(&mut preferences.clock_output);
     for extra_output in &mut preferences.extra_outputs {
         replaced_routes += take_unreadable_rows(&mut extra_output.settings);
@@ -1162,9 +1001,8 @@ pub(crate) fn load_preferences(raw: Option<&str>, backup_key: &str) -> LoadedPre
              changes made in this session will not be saved."
         ));
     }
-    // Layout 1 without `paths` is migrated by `sanitize_preferences`; the
-    // other field defaults cover older layouts.  A newer file is not saved
-    // back over at all, so the value never leaves this build's layout.
+    // A newer file is not saved back over, so the value stays this
+    // build's layout.
     LoadedPreferences {
         preferences: Some(preferences),
         backup: if notices.is_empty() { None } else { backup },
@@ -1173,10 +1011,8 @@ pub(crate) fn load_preferences(raw: Option<&str>, backup_key: &str) -> LoadedPre
     }
 }
 
-/// Keeps the text a load could not read whole under the key it chose.  The
-/// app calls this at the start of every save, before the startup scan's gate,
-/// so a quit while that scan still runs cannot drop the copy.  Written once,
-/// then cleared; a later damaged load overwrites it.
+/// Before the startup-scan gate, so a quit during that scan cannot drop
+/// the copy.
 pub(crate) fn store_preferences_backup(
     storage: &mut dyn eframe::Storage,
     backup: &mut Option<(String, String)>,
@@ -1186,10 +1022,8 @@ pub(crate) fn store_preferences_backup(
     }
 }
 
-/// Writes the preferences.
 pub(crate) fn store_preferences(storage: &mut dyn eframe::Storage, preferences: &Preferences) {
-    // Only `paths` is written: anything still held in the legacy mix fields
-    // (preferences or a session from before paths) moves there first.
+    // Only `paths` is written.  Top-level mix fields move there first.
     let mut preferences = preferences.clone();
     preferences.migrate_paths();
     if let Some(current) = preferences.paths.first().cloned() {

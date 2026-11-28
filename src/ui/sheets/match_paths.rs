@@ -1,5 +1,4 @@
-//! The Match paths sheet: the reference, the measurement, and one proposed
-//! trim per path.  Nothing is written until Apply.
+//! The Match paths sheet.  Nothing is written until Apply.
 
 use eframe::egui;
 use egui::{Align, Layout, RichText, Vec2};

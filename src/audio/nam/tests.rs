@@ -1,7 +1,4 @@
-//! The NAM stack: sanitising, the published order, loading a capture,
-//! bypass, warm-up, the swap fades, the fades of a removal and a reorder,
-//! the level match between blocks, and the queue: no model is dropped by
-//! the stage, and no command is lost or spun on.
+//! No model is dropped by the stage, and no command is lost or spun on.
 
 use super::{
     can_oversample, estimate_load, measure_load, prepare_nam_json, prepare_nam_json_at,
@@ -1088,12 +1085,9 @@ fn a_settled_bypass_keeps_its_dry_history() {
 
 #[test]
 fn one_block_at_unity_is_the_model_run_by_hand() {
-    // The null path of the migration: one block, unity trims, no level
-    // match, enabled — the old single stage's math.  It must be the model
-    // itself, sample for sample, within the one rounding of the wet mix
-    // (`dry + (wet - dry) * 1.0`, see `NamSlot::process_block`).  One block
-    // is a group of one: the oversampler is present but never engaged, and
-    // the block reports no added latency.
+    // One block, unity trims.  The wet mix is `dry + (wet - dry) * 1.0`,
+    // one rounding off the model.  A group of one never engages the
+    // oversampler and adds no latency.
     let controls = controls(&[block(0)]);
     let mut stage = NamStage::new(48_000);
     stage.install_for_test(0, tiny());
@@ -1131,17 +1125,11 @@ fn one_block_at_unity_is_the_model_run_by_hand() {
     }
 }
 
-// The migration null test against the old build.  `scripts/nam-null-test.sh`
-// renders the reference with the single stage this stack replaced; without
-// `RIGWERK_NAM_REFERENCE` the test passes without doing anything.
+// `scripts/nam-null-test.sh` writes the reference.  Without
+// `RIGWERK_NAM_REFERENCE` the test does nothing.
 
-/// The largest difference the migrated stack may have from the old stage.
-/// Both builds run the same ramps and the same mix; the level match is
-/// exactly 1.0 for one block.  The one difference is the vendored nam-rs,
-/// whose vectorized `tanh` moves a standard WaveNet capture by up to 1.2e-5
-/// when it is driven near 0 dBFS (4.3e-6 on this test's signal), the
-/// synthetic one by 2e-7 and the ReLU one not at all.  This covers that,
-/// not a change in behaviour.
+/// Vendored nam-rs `tanh` moves a WaveNet by up to 1.2e-5 near 0 dBFS
+/// (4.3e-6 on this signal), a synthetic model by 2e-7, ReLU not at all.
 const NULL_TOLERANCE: f32 = 2.0e-5;
 
 /// The reference's cases: (from block, enabled, post, input dB, output dB).
@@ -1223,12 +1211,9 @@ fn a_migrated_stage_nulls_against_the_old_build() {
                     NamFile::RateMismatch { file_rate, .. } => panic!("{stem}: {file_rate} Hz"),
                     NamFile::Failed(error) => panic!("{stem}: {error}"),
                 };
-            // The bypass fade is 10 ms here and was 5 ms in the old stage, so
-            // after a toggle the two differ until both fades are done: the
-            // warm-up (whole blocks), the 10 ms fade, and a block either side.
-            // An LSTM (no receptive field) keeps the state it stopped with,
-            // and the two stopped at different samples, so a toggle case
-            // cannot null for it at all.
+            // The fades differ in length, so the windows around a toggle
+            // cannot null.  An LSTM keeps the state it stopped on, and
+            // the two stopped on different samples.
             let field = prepared.model.receptive_field();
             let toggles: Vec<usize> = segments
                 .windows(2)

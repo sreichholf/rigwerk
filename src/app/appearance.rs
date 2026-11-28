@@ -1,10 +1,5 @@
-//! The theme and the interface size: preferences that change egui, never
-//! the bridge.
-//!
-//! RigWerk's preference wins over egui's own saved memory: [`RigWerkApp::
-//! apply_appearance`] sets both on the context at start.  egui's own
-//! keyboard zoom is off, so Ctrl++, Ctrl+− and Ctrl+0 come here (the frame
-//! reads the keys) and are saved with the other preferences.
+//! The saved theme and size override egui's own memory.  Keyboard zoom
+//! is off, so Ctrl++, Ctrl+− and Ctrl+0 land here and are saved.
 
 use eframe::egui;
 

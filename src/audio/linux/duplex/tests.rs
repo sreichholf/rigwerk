@@ -1,7 +1,5 @@
 use super::virtual_source::{VirtualOutputSlot, VirtualWrite};
 
-/// The panic path closes the seqlock with zero frames and an even generation,
-/// so RigWerk Out reads silence instead of spinning on an abandoned write.
 #[test]
 fn an_abandoned_virtual_write_publishes_silence_with_an_even_generation() {
     let slot = VirtualOutputSlot::new();
@@ -19,7 +17,6 @@ fn an_abandoned_virtual_write_publishes_silence_with_an_even_generation() {
     assert_eq!(left, [9.0; 4], "nothing was published");
 }
 
-/// A finished write is the only path that publishes frames.
 #[test]
 fn a_finished_virtual_write_publishes_its_frames() {
     let slot = VirtualOutputSlot::new();
@@ -36,8 +33,6 @@ fn a_finished_virtual_write_publishes_its_frames() {
     assert_eq!((left[0], right[0]), (0.5, -0.5));
 }
 
-/// An abandoned write must not leave the previous buffer looking current:
-/// RigWerk Out plays silence instead of repeating stale audio.
 #[test]
 fn an_abandoned_write_does_not_replay_the_previous_buffer() {
     let slot = VirtualOutputSlot::new();
@@ -56,8 +51,6 @@ fn an_abandoned_write_does_not_replay_the_previous_buffer() {
     assert_eq!(slot.read(&mut left, &mut right, 4), 0);
 }
 
-/// The panic path's empty publication clears a buffer that was finished
-/// before the panic, so the reader sees silence and not the last good block.
 #[test]
 fn an_empty_publication_clears_the_last_buffer() {
     let slot = VirtualOutputSlot::new();
@@ -75,10 +68,8 @@ fn an_empty_publication_clears_the_last_buffer() {
     assert_eq!(slot.read(&mut left, &mut right, 4), 0);
 }
 
-/// Runs the real bridge entry point against a live PipeWire daemon.
-/// Set `RIGWERK_PW_SOURCE` and `RIGWERK_PW_SINK` to node names (any node
-/// with audio output ports works as the source, e.g. a `pw-cat` tone)
-/// and run with `--ignored`.
+/// Needs `RIGWERK_PW_SOURCE` and `RIGWERK_PW_SINK` (node names) and
+/// `--ignored`.
 #[test]
 #[ignore = "needs a running PipeWire daemon and test nodes"]
 fn duplex_bridge_runs_against_a_live_daemon() {

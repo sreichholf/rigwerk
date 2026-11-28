@@ -1,18 +1,13 @@
-//! The allocation guard: what it counts, and what it leaves alone.  A free
-//! counts too: dropping a model on the audio thread is a heap call.
-//!
-//! Release builds count nothing, so a test that asserts a nonzero count is
-//! debug-only; the tests at the end pin what a release build does promise,
-//! which is zeros and a guard that enters and drops without a panic.
+//! A free counts too.  Release builds count nothing, so a nonzero count is
+//! debug-only; the tests at the end pin the release zeros.
 
 use super::RtGuard;
 
-/// Something that allocates, so a violation is not an optimised-away call.
+/// A real heap call, so the optimiser cannot drop it.
 fn allocate() -> Vec<u8> {
     Vec::with_capacity(64)
 }
 
-// Release builds count nothing, so a count above zero is debug-only.
 #[cfg(debug_assertions)]
 #[test]
 fn an_allocation_inside_the_guard_is_counted() {
@@ -29,7 +24,6 @@ fn an_allocation_outside_the_guard_is_not_counted() {
     assert_eq!(guard.allocations(), 0);
 }
 
-// Both counts are debug-only; the release zeros are pinned at the end.
 #[cfg(debug_assertions)]
 #[test]
 fn the_guard_starts_over_with_each_block() {
@@ -42,7 +36,6 @@ fn the_guard_starts_over_with_each_block() {
     assert_eq!(second.allocations(), 0, "a new block counts from zero");
 }
 
-// Inner guards share the outer count, which is debug-only.
 #[cfg(debug_assertions)]
 #[test]
 fn a_nested_guard_counts_with_the_outer_one() {
@@ -63,7 +56,6 @@ fn a_nested_guard_counts_with_the_outer_one() {
     assert_eq!(fresh.allocations(), 0, "the outermost drop ended the block");
 }
 
-// Release builds count nothing, so the frees are only seen in debug.
 #[cfg(debug_assertions)]
 #[test]
 fn a_free_inside_the_guard_is_counted_apart_from_allocations() {
@@ -74,9 +66,6 @@ fn a_free_inside_the_guard_is_counted_apart_from_allocations() {
     assert_eq!(guard.allocations(), 0, "a free is not an allocation");
 }
 
-/// The callback marker follows the guard: set by `enter`, still set while a
-/// nested guard is open, and cleared when the outermost one drops.  Release
-/// builds have no marker, so this is a debug claim.
 #[cfg(debug_assertions)]
 #[test]
 fn the_callback_marker_is_true_only_inside_a_guard() {
@@ -149,9 +138,6 @@ fn the_outermost_drop_publishes_the_count() {
     );
 }
 
-// What a release build promises instead: the flag is compiled away, so every
-// count is zero and the guard still enters and drops.  These are the evidence
-// a release test run has, and nothing here should ever start counting.
 #[cfg(not(debug_assertions))]
 #[test]
 fn a_release_build_counts_no_allocations_and_no_frees() {

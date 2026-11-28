@@ -8,7 +8,6 @@ fn ignore(_: u32) {}
 #[test]
 fn values_come_out_in_order_and_a_full_queue_hands_the_value_back() {
     let (mut tx, mut rx) = queue(3, ignore);
-    // Rounded up to four.
     assert_eq!(tx.room(), 4);
     for value in 0..4 {
         assert!(tx.push(value).is_ok());
@@ -86,7 +85,6 @@ fn a_producer_and_a_consumer_thread_pass_every_value_once_and_in_order() {
                         }
                         value = Box::new(Counted(next));
                     }
-                    // Handed back, not dropped: try it again.
                     Err(back) => {
                         value = back;
                         std::thread::yield_now();

@@ -1,7 +1,6 @@
-//! Finding VST3, CLAP and LV2 bundles and adding them to a path's effect
-//! chain.  Favourites, recent effects, where the next one is added, and how
-//! the browser ranks its rows live here.  The screen draws them; this file
-//! does not.
+//! A hung bundle must not hold the process.  CLAP runs in a child killed
+//! at [`SCAN_TIMEOUT`].  A hung VST3 or LV2 still sticks the scan thread;
+//! the browser's deadline only unlatches the button.
 
 use crate::app::LogTone;
 use std::path::{Path, PathBuf};
@@ -16,30 +15,16 @@ use crate::audio::lv2::{self, Lv2Candidate};
 use crate::audio::vst3;
 use crate::audio::{PluginFormat, PluginPref};
 
-/// How many recently used effects are kept.
 const RECENT_LIMIT: usize = 10;
 
-/// How long a scan may run before the browser gives up on it.  A library of
-/// several hundred bundles finishes in seconds even with cold caches, so a
-/// scan still silent after this holds a bundle that will never answer, and
-/// the user needs Rescan back.
-///
-/// This is the scan's own budget ([`scan_library`]) and not only the
-/// browser's: VST3 and LV2 run in this process and CLAP runs in a child
-/// bounded by what is left of it, so a hung `clap_entry.init` or an abort in
-/// a bundle neither holds the process-wide module lock nor ends the app.  A
-/// VST3 or LV2 bundle that hangs still leaves the scan thread stuck, and the
-/// browser's deadline only unlatches the button.
 const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// How long the browser keeps waiting past [`SCAN_TIMEOUT`].  The child is
-/// killed at the deadline and its failure rows still have to reach the
-/// channel; without the grace the browser would drop the receiver first and
-/// show its generic "stopped waiting" notice instead of the rows.
+/// The child is killed at [`SCAN_TIMEOUT`].  This wait lets its failure
+/// rows arrive before the browser drops the receiver.
 const SCAN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Time kept back from the CLAP child's budget so this process can kill it,
-/// read its result and send the rows before the scan's own deadline passes.
+/// Kept back from the CLAP child's budget so this process can kill it
+/// and send the rows before [`SCAN_TIMEOUT`].
 const CLAP_SAVE_RESERVE: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// One effect in the favourites or the recent list.  The path, the format,

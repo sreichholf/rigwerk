@@ -1,7 +1,3 @@
-//! The input strip: the device (a click opens Setup › Devices), *In 1* /
-//! *In 2*, the scope (a click opens the scope sheet), *Driver panel* for
-//! an ASIO input, and the input gain over the stereo meter.
-
 use eframe::egui;
 use egui::{CornerRadius, Rect, Sense, Stroke, Vec2};
 
@@ -109,8 +105,6 @@ impl RigWerkApp {
         }
     }
 
-    /// The input and the output overlaid, small.  Clicking it opens the
-    /// scope sheet.
     fn mini_scope(&self, ui: &mut egui::Ui) -> egui::Response {
         let colours = palette(ui.ctx());
         let width = ui.available_width();
@@ -146,8 +140,7 @@ impl RigWerkApp {
         response.on_hover_text("Scope: input and output, the peaks and the sample count")
     }
 
-    /// *Driver panel* for an ASIO input: disabled until the bridge runs on
-    /// that driver, with that reason on hover.
+    /// Disabled until the bridge runs on that driver, with the reason on hover.
     fn input_driver_panel(&mut self, ui: &mut egui::Ui) {
         let side = AsioPanelSide::Input;
         if let Some(ready) = self.driver_panel(side) {

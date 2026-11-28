@@ -50,8 +50,7 @@ fn failure_messages_keep_the_host_texts() {
         "The plugin stopped responding while it was paused and no longer processes audio. \
          Restart RigWerk to recover."
     );
-    // The CLAP processor reports the failure, not a text: each kind keeps
-    // the text the CLAP host used to report.
+    // The CLAP processor reports the failure, not a text.
     for (failure, text) in [
         (ClapFailure::NotActive, "The CLAP plugin is not active."),
         (

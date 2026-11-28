@@ -105,7 +105,8 @@ fn node_latency_follows_the_low_latency_switch() {
 
 #[test]
 fn playback_fills_the_requested_quantum_not_the_mapped_maxsize() {
-    // Stereo f32: 8 bytes/frame. A typical map is 8192 frames; the cycle asks for 64.
+    // Stereo f32 is 8 bytes/frame.  8192 is a typical map; the cycle asks
+    // for 64.
     assert_eq!(playback_frames(8192 * 8, 8, 64), 64);
     assert_eq!(playback_frames(8192 * 8, 8, 0), 8192);
     assert_eq!(playback_frames(128 * 8, 8, 1024), 128);
@@ -115,23 +116,17 @@ fn playback_fills_the_requested_quantum_not_the_mapped_maxsize() {
 
 #[test]
 fn capture_reads_from_the_chunk_offset_with_its_stride() {
-    // Packed stereo f32, no offset: every byte of `size` is frames.
     let window = capture_window(8192, 0, 64 * 8, 0, 2);
     assert_eq!((window.start, window.stride, window.frames), (0, 8, 64));
-    // An offset moves the start, and the size is bounded by what is
-    // mapped after it.
     let window = capture_window(1024, 1000, 512, 8, 2);
     assert_eq!((window.start, window.frames), (1000, 3));
-    // The offset is taken modulo the mapped size.
+    // Offset is taken modulo the mapped size.
     assert_eq!(capture_window(1024, 1024 + 16, 64, 8, 2).start, 16);
-    // A wider stride than the samples (padding) is honoured; the last
-    // frame does not need trailing padding.
+    // The last frame needs its samples, not a whole stride of padding.
     let window = capture_window(4096, 0, 16 * 3 + 8, 16, 2);
     assert_eq!((window.stride, window.frames), (16, 4));
-    // A stride too small for the channels falls back to packed frames.
     assert_eq!(capture_window(4096, 0, 64, 4, 2).stride, 8);
     assert_eq!(capture_window(4096, 0, 64, -8, 2).stride, 8);
-    // Nothing mapped, or less than one frame, yields no frames.
     assert_eq!(capture_window(0, 0, 64, 8, 2).frames, 0);
     assert_eq!(capture_window(4096, 0, 7, 8, 2).frames, 0);
 }
@@ -159,8 +154,7 @@ fn listing_nodes_returns_whether_or_not_a_server_is_running() {
     }
 }
 
-/// Packed stereo f32 little-endian, the layout `push_capture` reads when the
-/// chunk has no padding.
+/// Packed stereo f32, the no-padding layout `push_capture` reads.
 fn packed_stereo(frames: &[(f32, f32)]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(frames.len() * 8);
     for &(left, right) in frames {
@@ -196,8 +190,8 @@ fn a_muted_capture_channel_still_reaches_the_tap() {
     assert_eq!(peaks(&shared), (0.0, 0.25));
 }
 
-/// A one-channel chunk repeats its only sample on both sides before the
-/// stage, which takes a full pair.  The rule stays in this file.
+/// The only sample is copied to both sides before the stage, which takes
+/// a pair.
 #[test]
 fn a_mono_capture_chunk_copies_its_sample_to_both_sides() {
     let shared = Shared::new(48_000);

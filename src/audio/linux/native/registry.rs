@@ -1,11 +1,7 @@
-//! Source and sink add and remove events from the PipeWire registry.
-//!
-//! `list_nodes` is a one-shot pass, so without this a new node waited for
-//! the slow device poll.  A dedicated thread keeps a registry listener open
-//! and sends `()` when a node that `list_nodes` would show appears or goes
-//! away.  RigWerk's own nodes are not endpoints, so starting the bridge does
-//! not wake a scan.  The nodes present at connect are only recorded; a
-//! reconnect sends one wake, because the graph may have changed meanwhile.
+//! `list_nodes` is one shot, so a new node would wait for the slow poll.
+//! RigWerk's own nodes are not endpoints, so starting the bridge does not
+//! wake a scan.  Nodes present at connect are only recorded; a reconnect
+//! wakes once, because the graph may have changed.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -18,12 +14,10 @@ use ::pipewire as pw;
 
 use super::{endpoint_kind, ensure_init, EndpointKind};
 
-/// How long to wait before connecting again when no server is running or
-/// the connection was lost.
+/// Retry when no server is running or the connection was lost.
 const RETRY: Duration = Duration::from_secs(5);
 
-/// The endpoint a node's registry properties describe, with the same filter
-/// as `list_nodes`.  `get` looks up one property.
+/// Same filter as `list_nodes`.
 pub(crate) fn props_endpoint<'a>(get: impl Fn(&str) -> Option<&'a str>) -> Option<EndpointKind> {
     let name = get("node.name")?;
     let class = get("media.class").unwrap_or("");
@@ -31,12 +25,9 @@ pub(crate) fn props_endpoint<'a>(get: impl Fn(&str) -> Option<&'a str>) -> Optio
     endpoint_kind(name, class, monitor)
 }
 
-/// Watches the registry and sends on the channel when an endpoint is added
-/// or removed.
-///
-/// Without a server the thread retries every few seconds, and the caller
-/// keeps its slow poll.  One process-wide watch is enough.  The thread ends
-/// once the receiver is dropped and the next event finds it gone.
+/// Without a server the thread retries, and the caller keeps its slow poll.
+/// One process-wide watch is enough.  The thread ends once the receiver is
+/// dropped and the next event finds it gone.
 pub(crate) fn spawn() -> Receiver<()> {
     let (sender, receiver) = mpsc::channel();
     let _ = thread::Builder::new()
@@ -54,16 +45,15 @@ pub(crate) fn spawn() -> Receiver<()> {
 
 #[derive(Default)]
 struct State {
-    /// Registry ids of the endpoints seen, so a removal can be matched.
+    /// Registry ids seen, so a removal can be matched.
     endpoints: HashSet<u32>,
-    /// The first sync finished: what arrives from now on is a change.
+    /// After the first sync, arrivals are changes.
     synced: bool,
     /// The receiver is gone.
     closed: bool,
 }
 
-/// One connection.  Returns `false` once the receiver is gone, `true` when
-/// the caller should connect again.
+/// `false` once the receiver is gone; otherwise connect again.
 fn watch(sender: &Sender<()>, announce: bool) -> bool {
     let Ok(mainloop) = pw::main_loop::MainLoopRc::new(None) else {
         return true;

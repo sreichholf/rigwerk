@@ -1,7 +1,5 @@
-//! The one slider, plus the focus, row and keyboard helpers it shares with
-//! the fader.  Arrow-key stepping and the AccessKit node are written once
-//! ([`key_steps`], [`slider_access`]) so both controls get an accessibility
-//! fix together.
+//! The slider, plus the focus and keyboard helpers it shares with the fader,
+//! written once so both get an accessibility fix together.
 
 use eframe::egui;
 use egui::{Align, Color32, CornerRadius, Layout, Rect, Sense, Stroke, Vec2};
@@ -9,10 +7,8 @@ use egui::{Align, Color32, CornerRadius, Layout, Rect, Sense, Stroke, Vec2};
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, with_alpha, TypeRole};
 
-/// Colour, name and the optional readout for [`styled_slider`].
-///
-/// A bare [`Color32`] keeps existing call sites.  A `(color, name)` pair is
-/// the name AccessKit reads.
+/// A bare [`Color32`] keeps existing call sites.  A `(color, name)` pair
+/// is the name AccessKit reads.
 pub(crate) struct SliderStyle {
     color: Color32,
     name: String,
@@ -95,8 +91,8 @@ impl From<(Color32, String)> for SliderStyle {
     }
 }
 
-/// Keyboard focus on a custom-painted control. Enter and Space already activate
-/// a focusable widget; this is the ring that was missing.
+/// Enter and Space already activate a focused widget; this is the ring
+/// that was missing.
 pub(crate) fn show_focus_ring(ui: &egui::Ui, response: &egui::Response, rect: Rect, radius: u8) {
     if !response.has_focus() {
         return;
@@ -111,7 +107,6 @@ pub(crate) fn show_focus_ring(ui: &egui::Ui, response: &egui::Response, rect: Re
     );
 }
 
-/// Name and value for a custom row. `selected` is the toggled value.
 pub(crate) fn row_info(
     response: &egui::Response,
     role: egui::Role,
@@ -133,11 +128,8 @@ pub(crate) fn row_info(
     });
 }
 
-/// The gain slider's look, with an explicit step, for other values in the app.
-///
-/// A `step` of zero, or a non-finite one, means a continuous track: the
-/// keyboard tick and the drag speed are then `span / 100`, which the zero-step
-/// call sites rely on.
+/// A `step` of zero, or a non-finite one, is a continuous track: the
+/// keyboard tick and the drag speed are then `span / 100`.
 pub(crate) fn styled_slider(
     ui: &mut egui::Ui,
     value: &mut f32,
@@ -158,11 +150,9 @@ pub(crate) fn styled_slider(
     let width = style.width.unwrap_or_else(|| ui.available_width());
     let (rect, mut response) =
         ui.allocate_exact_size(Vec2::new(width, 22.0), Sense::click_and_drag());
-    // Inset the track so the 7px grip stays inside the allocated rect.
-    // The empty part is the well, so equal-length tracks read as equal
-    // (a short fill must not look like a short slider).  The grip is a
-    // slot: its idle edge is the line, and a hover uses the text colour.
-    // The caller colour is only the filled part.
+    // Inset so the grip stays inside the rect.  The empty part is the
+    // well, so a short fill is not a short slider.  The caller colour is
+    // only the filled part.
     let colours = palette(ui.ctx());
     let enabled = ui.is_enabled();
     let accent = if enabled { style.color } else { colours.text3 };
@@ -302,11 +292,8 @@ pub(crate) fn styled_slider(
     response.on_hover_and_drag_cursor(egui::CursorIcon::ResizeHorizontal)
 }
 
-/// Arrow keys and a screen reader's increment, decrement or set-value for a
-/// focused custom control.  The return is the steps to apply, whether Shift
-/// asks for the fine step, and an exact value to jump to.  `focused_only`
-/// restores the fader's rule that a screen reader request does nothing while
-/// the control is unfocused.
+/// `focused_only` is the fader's rule: a screen reader request does nothing
+/// while the control is unfocused.
 pub(crate) fn key_steps(
     ui: &egui::Ui,
     response: &egui::Response,
@@ -355,7 +342,6 @@ pub(crate) fn key_steps(
     (steps + access_steps, fine, set_value)
 }
 
-/// Name, range and current value for a screen reader on a custom slider.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn slider_access(
     ui: &egui::Ui,

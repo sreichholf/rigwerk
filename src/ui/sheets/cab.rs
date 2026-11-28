@@ -1,12 +1,6 @@
-//! The cabinet sheet's body: the impulse folder, the responses in it, the
-//! level, the cuts and the polarity.
-//!
-//! The header above (`sheets.rs`) already holds *On* / *Bypass*.  The
-//! responses and the controls are
-//! [`catalog_columns`](super::catalog::catalog_columns), the same split the
-//! NAM sheet uses.  The page writes [`CabControls`](crate::audio::CabControls)
-//! onto the path; the frame's mix push carries them, and a cut or a polarity
-//! change is rebaked by `sync_cab_files`.  This file does not call the engine.
+//! The cabinet sheet.  It does not call the engine.  The frame's mix push
+//! carries the controls, and a cut or a polarity change is rebaked by
+//! `sync_cab_files`.
 
 use eframe::egui;
 use egui::{Align, Layout, RichText};
@@ -33,7 +27,6 @@ fn hz_label(hz: f32) -> String {
 }
 
 impl RigWerkApp {
-    /// The cabinet sheet body for path `path`.
     pub(crate) fn cab_sheet(&mut self, ui: &mut egui::Ui, path: usize) {
         let edit_id = ui.make_persistent_id("cab-impulses-folder");
         let editing = ui.memory(|memory| memory.has_focus(edit_id));

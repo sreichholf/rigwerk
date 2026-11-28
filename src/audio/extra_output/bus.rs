@@ -1,13 +1,10 @@
-//! Per-extra output ring and bridge buffer.  The clock callback pushes the extra output's
-//! finished device channels here (its own sum of the paths, aligned and
-//! mapped); the extra output's own cpal stream drains them with the same
-//! ring → resampler → drift loop the clock path uses, without the chain.
+//! Up to 4 channels the ring also carries click-free lanes for the take.
+//! Wider devices do not fit both in [`FRAME_LANES`], so the take keeps
+//! the click.  The ring is allocated with the bus (two seconds); the
+//! bridge-buffer ceiling is half of that.
 //!
-//! A device of up to 4 channels gets twice its lanes: the played frame,
-//! then the click-free frame a take records ([`carries_record`]).  The
-//! layout is fixed when the ring is laid out for the device.  Past 4
-//! channels both would not fit in [`FRAME_LANES`], so the ring carries
-//! the played frame only and that extra output's take keeps the click.
+//! The layout generation is read at the start of a clock block.  A reopen
+//! stops that block from pushing further.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
@@ -16,15 +13,10 @@ use super::super::output_map::{frame_lanes, DeviceFrame, FRAME_LANES};
 use super::super::ring::{FrameRing, LaneFrame};
 use super::super::types::BufferMode;
 
-/// Whether a `channels`-channel extra output's ring also carries the
-/// click-free lanes: both halves fit in [`FRAME_LANES`] (4 channels or
-/// fewer).
 pub(crate) fn carries_record(channels: usize) -> bool {
     frame_lanes(channels) * 2 <= FRAME_LANES
 }
 
-/// Ring lanes per frame for a `channels`-channel extra output: its
-/// [`frame_lanes`], doubled when it [`carries_record`].
 pub(crate) fn ring_lanes(channels: usize) -> usize {
     let lanes = frame_lanes(channels);
     if carries_record(channels) {
@@ -34,43 +26,35 @@ pub(crate) fn ring_lanes(channels: usize) -> usize {
     }
 }
 
-/// One generic extra output's playback bus: SPSC ring plus its own bridge buffer.
 pub(crate) struct ExtraOutputBus {
-    /// [`ring_lanes`] per frame: one lane per device channel (see
-    /// [`frame_lanes`]), then the click-free ones when it [`carries_record`].
     pub(crate) ring: FrameRing,
-    /// The device's channel count, set before the stream opens; the clock
-    /// side maps the extra output onto this many channels.
+    /// The clock side maps onto this many channels.  Set before the stream
+    /// opens.
     channels: AtomicU32,
-    /// Bumped whenever the ring is emptied or laid out anew.  The clock side
-    /// reads it at the start of a block and stops pushing once it moves, so
-    /// a long block never runs on into a reopened ring.
+    /// Bumped when the ring is emptied or laid out again.  The clock side
+    /// reads it at the start of a block and stops pushing once it moves.
     generation: AtomicU64,
     pub(crate) target_frames: AtomicU64,
     pub(crate) base_frames: AtomicU64,
-    /// Producer block size in source frames (the clock output's step).
+    /// Producer block, in source frames (the clock output's step).
     pub(crate) input_block: AtomicU64,
-    /// Consumer block size in source frames (extra output device step, converted).
+    /// Consumer block, in source frames (the device step, converted).
     pub(crate) output_block: AtomicU64,
     pub(crate) bridge_buffer_mode: AtomicU32,
     pub(crate) fixed_bridge_buffer_ms: AtomicU32,
-    /// Rate the producer writes at (the clock output's output rate).
     pub(crate) source_rate: AtomicU32,
-    /// Rate the extra output device plays at, published when its stream opens.
-    /// 0 until then.  This is not [`Self::source_rate`]: a cable whose rate
-    /// differs from the clock plays the resampled frame, and a recording
-    /// of that endpoint has to use this rate.
+    /// The device's opened rate, not [`Self::source_rate`].  0 until a
+    /// stream publishes one.  A recording of this endpoint uses this rate.
     playback_rate: AtomicU32,
-    /// Frames the extra output device asked for in its last callback: the
-    /// buffer its driver really runs at, not the one requested.  0 until
-    /// the stream's first callback.
+    /// The buffer the driver really runs, not the one requested.  0 until
+    /// the first callback.
     device_block: AtomicU32,
     pub(crate) dropouts: AtomicU64,
     pub(crate) overruns: AtomicU64,
-    /// Stream open failed or the device vanished; the bridge keeps running.
+    /// Open failed or the device vanished.  The bridge keeps running.
     pub(crate) missing: AtomicBool,
-    /// The drift loop's integral sits at its limit: the extra output's clock is
-    /// further off than the loop can steer.  Written once per extra output block.
+    /// The integral is at its limit: the clock is further off than the loop
+    /// can steer.
     pub(crate) drift_at_limit: AtomicBool,
 }
 
@@ -96,8 +80,7 @@ impl ExtraOutputBus {
         }
     }
 
-    /// Clears ring counters and health for a fresh open.  Settings (bridge buffer)
-    /// stay; the UI re-pushes them every frame.
+    /// Settings stay.  The UI re-pushes the bridge buffer every frame.
     pub(crate) fn reset_playback(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.ring.reset();
@@ -111,9 +94,8 @@ impl ExtraOutputBus {
         self.lift_to_floor();
     }
 
-    /// Sizes the ring for a `channels`-channel device and empties it.  Only
-    /// while no stream drains it and the clock side does not feed it (the
-    /// slot's ring-active flag is off).
+    /// Only while the slot's ring-active flag is off: nothing is draining
+    /// or feeding the ring.
     pub(crate) fn set_device_channels(&self, channels: usize) {
         let channels = channels.max(1);
         self.channels
@@ -123,18 +105,14 @@ impl ExtraOutputBus {
         self.lift_to_floor();
     }
 
-    /// The ring's layout generation (see the field).
     pub(crate) fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
     }
 
-    /// The device channel count the ring is laid out for.
     pub(crate) fn device_channels(&self) -> usize {
         self.channels.load(Ordering::Relaxed) as usize
     }
 
-    /// Producer side: one mapped device frame, with its click-free lanes
-    /// after the played ones when the ring [`carries_record`].
     pub(crate) fn push_frame(&self, frame: &DeviceFrame) {
         let wet = frame.lanes();
         let count = wet.len();
@@ -148,7 +126,6 @@ impl ExtraOutputBus {
         }
     }
 
-    /// Producer side: one frame as lanes (missing lanes are silence).
     pub(crate) fn push_lanes(&self, lanes: &[f32]) {
         if !self.ring.push(lanes) {
             self.overruns.fetch_add(1, Ordering::Relaxed);
@@ -167,21 +144,16 @@ impl ExtraOutputBus {
         self.target_frames.load(Ordering::Relaxed) as usize
     }
 
-    /// The ring's fill against its bridge buffer, 0 to 1, as the clock's
-    /// `Shared::ring_fill`.
     pub(crate) fn fill(&self) -> f32 {
         let target = self.target_frames().max(1) as f32;
         (self.ring_frames() as f32 / target).clamp(0.0, 1.0)
     }
 
-    /// Extra output side, every callback: the frames the device asked for.
     pub(crate) fn note_device_block(&self, frames: usize) {
         self.device_block
             .store(frames.min(u32::MAX as usize) as u32, Ordering::Relaxed);
     }
 
-    /// The frames the device asked for in its last callback (see the
-    /// field).
     pub(crate) fn device_block(&self) -> u32 {
         self.device_block.load(Ordering::Relaxed)
     }
@@ -204,13 +176,11 @@ impl ExtraOutputBus {
         self.lift_to_floor();
     }
 
-    /// Publishes the opened device rate (0 clears it).  The clock side's
-    /// producer rate stays on [`Self::set_source_rate`].
+    /// 0 clears it.  The producer rate stays on [`Self::set_source_rate`].
     pub(crate) fn set_playback_rate(&self, rate: u32) {
         self.playback_rate.store(rate, Ordering::Relaxed);
     }
 
-    /// The opened device rate, or 0 when no stream has published one.
     pub(crate) fn playback_rate(&self) -> u32 {
         self.playback_rate.load(Ordering::Relaxed)
     }

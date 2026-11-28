@@ -1,34 +1,19 @@
-//! Real-time scheduling for cpal's stream threads on Linux.
-//!
-//! cpal starts its ALSA input and output threads at normal priority.  Its
-//! `realtime` feature can only promote them through rtkit over D-Bus, which
-//! would add libdbus as a build dependency; without it the promotion is a
-//! silent no-op.  So the first callback on each cpal stream thread asks the
-//! kernel for `SCHED_FIFO` itself, once.  That succeeds for a user with an
-//! `RLIMIT_RTPRIO` (the usual `audio` group setup in
-//! `/etc/security/limits.d`) or `CAP_SYS_NICE`.  A refusal leaves the thread
-//! as it was: playback runs exactly as before, just without the priority.
-//!
-//! PipeWire's own data thread is already real time (module-rt), and Windows
-//! gets the same promotion from cpal's `realtime` feature, so this is a no-op
-//! there.
+//! cpal's ALSA threads start at normal priority.  The first callback asks
+//! for `SCHED_FIFO` once: cpal's `realtime` feature needs rtkit and is a
+//! no-op without it.  A refusal leaves the thread as it was.  PipeWire and
+//! Windows already promote their own threads.
 
-/// The priority asked for, unless the RT limit allows less.  Below PipeWire's
-/// data thread (88 by default) and the usual IRQ threads (50 is the kernel
-/// default for threaded IRQs, so audio stays above them), like JACK's 70.
+/// Below PipeWire's data thread (88) and above threaded IRQs (50).
 #[cfg(target_os = "linux")]
 const WANTED_PRIORITY: libc::c_int = 70;
 
-/// Tries once per thread; later calls are a plain flag check.
+/// One attempt per thread.  Later calls are the flag check.
 #[derive(Default)]
 pub(crate) struct PromoteOnce {
     tried: bool,
 }
 
 impl PromoteOnce {
-    /// Call at the top of a stream callback.  The first call makes one or two
-    /// syscalls on this (the stream's) thread; every later call returns
-    /// straight away.
     #[inline]
     pub(crate) fn run(&mut self) {
         if self.tried {
@@ -44,14 +29,12 @@ fn promote_current_thread() -> bool {
     let Some(priority) = allowed_priority() else {
         return false;
     };
-    // All-zero is a valid `sched_param` everywhere Linux libc defines one;
-    // only the priority matters to `SCHED_FIFO`.  (musl's newer libc crate
-    // layout adds private padding fields that a struct literal cannot name.)
-    // SAFETY: `sched_param` is a plain C struct whose zero value is valid.
+    // All-zero is valid.  A struct literal cannot name musl's padding.
+    // SAFETY: `sched_param`'s zero value is valid.
     let mut param: libc::sched_param = unsafe { std::mem::zeroed() };
     param.sched_priority = priority;
-    // SCHED_RESET_ON_FORK keeps a child process from inheriting real time.
-    // SAFETY: plain syscall on the calling thread with a valid parameter.
+    // SCHED_RESET_ON_FORK keeps a child from inheriting real time.
+    // SAFETY: the calling thread, with a valid parameter.
     unsafe {
         libc::pthread_setschedparam(
             libc::pthread_self(),
@@ -61,12 +44,11 @@ fn promote_current_thread() -> bool {
     }
 }
 
-/// The priority to ask for: [`WANTED_PRIORITY`], lowered to the soft
-/// `RLIMIT_RTPRIO`.  A limit of 0 is still tried at the wanted priority,
-/// since root or `CAP_SYS_NICE` ignore the limit; the kernel says no otherwise.
+/// [`WANTED_PRIORITY`], lowered to the soft `RLIMIT_RTPRIO`.  A limit of 0
+/// is still tried: root and `CAP_SYS_NICE` ignore the limit.
 #[cfg(target_os = "linux")]
 fn allowed_priority() -> Option<libc::c_int> {
-    // SAFETY: plain syscalls with valid arguments.
+    // SAFETY: valid arguments.
     let (min, max) = unsafe {
         (
             libc::sched_get_priority_min(libc::SCHED_FIFO),
@@ -89,7 +71,6 @@ fn allowed_priority() -> Option<libc::c_int> {
     Some(priority_for(soft, min, max))
 }
 
-/// Pure part of [`allowed_priority`], for tests.
 #[cfg(target_os = "linux")]
 fn priority_for(soft_limit: libc::rlim_t, min: libc::c_int, max: libc::c_int) -> libc::c_int {
     let wanted = WANTED_PRIORITY.clamp(min, max);

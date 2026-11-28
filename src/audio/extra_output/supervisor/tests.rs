@@ -1,6 +1,3 @@
-//! Which plan slots the supervisor opens on their own cpal stream, and how a
-//! slot table opens, retries and closes them.
-
 use std::sync::atomic::Ordering;
 
 use super::super::super::shared::{ExtraOutputLink, ExtraOutputPlan, Shared};

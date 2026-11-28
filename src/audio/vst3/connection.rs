@@ -1,12 +1,7 @@
-//! The two `IConnectionPoint` proxies between a plugin's component and its
-//! separate controller (SDK `connectionproxy.cpp`, `plugprovider.cpp`).
-//!
-//! Each side is connected to a host proxy, not to the other side, so the
-//! host can drop a message sent from the wrong thread: `notify` is
-//! forwarded only on the thread that made the connection (the UI thread),
-//! as the SDK's proxy does.  Off that thread the proxy answers
-//! `kResultFalse` without touching its lock, so a plugin calling from its
-//! audio thread never waits.
+//! Host `IConnectionPoint` proxies between a component and its separate
+//! controller (SDK `connectionproxy.cpp`).  `notify` forwards only on the
+//! thread that connected.  Off that thread it returns `kResultFalse`
+//! without the lock, so an audio-thread caller never waits.
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,8 +14,7 @@ use ::vst3::Steinberg::Vst::{
 use ::vst3::Steinberg::{kResultFalse, kResultOk, tresult};
 use ::vst3::{Class, ComPtr, ComWrapper};
 
-/// The host side of one direction: what `source` sends arrives at
-/// `notify` and goes on to `dest`.
+/// One direction: `notify` from `source` is forwarded to `dest`.
 pub(crate) struct ConnectionProxy {
     /// The plugin end that sees this proxy as its peer.
     source: ComPtr<IConnectionPoint>,
@@ -28,7 +22,6 @@ pub(crate) struct ConnectionProxy {
     dest: Mutex<Option<ComPtr<IConnectionPoint>>>,
     /// The only thread messages are forwarded on.
     main_thread: ThreadId,
-    /// Test hook: messages forwarded to `dest`.
     #[cfg(test)]
     forwarded: AtomicUsize,
 }
@@ -48,8 +41,7 @@ impl ConnectionProxy {
         self.dest.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Links `source` to `dest` through `proxy`: `source.connect(proxy)`
-    /// (the SDK's `ConnectionProxy::connect`).
+    /// `source.connect(proxy)`, as the SDK's `ConnectionProxy::connect`.
     fn link(proxy: &ComWrapper<Self>, dest: ComPtr<IConnectionPoint>) -> tresult {
         *proxy.dest() = Some(dest);
         let this = proxy
@@ -65,8 +57,6 @@ impl ConnectionProxy {
         result
     }
 
-    /// Undoes [`Self::link`]: `source.disconnect(proxy)`, then forgets the
-    /// destination.  Nothing to do when not linked.
     fn unlink(proxy: &ComWrapper<Self>) {
         if proxy.dest().is_none() {
             return;
@@ -87,8 +77,7 @@ impl Class for ConnectionProxy {
 }
 
 impl IConnectionPointTrait for ConnectionProxy {
-    /// The host owns the links: a plugin may not repoint a proxy past the
-    /// thread check.
+    /// The host owns the links.  A plugin cannot repoint a proxy.
     unsafe fn connect(&self, _other: *mut IConnectionPoint) -> tresult {
         kResultFalse
     }
@@ -119,18 +108,15 @@ impl IConnectionPointTrait for ConnectionProxy {
     }
 }
 
-/// A component and its separate controller, connected both ways through
-/// host proxies.  Dropping it disconnects both.
 pub(crate) struct Connection {
     component_side: ComWrapper<ConnectionProxy>,
     controller_side: ComWrapper<ConnectionProxy>,
 }
 
 impl Connection {
-    /// Connects `component` and `controller`, component side first
-    /// (`plugprovider.cpp`).  `Ok(None)` when either has no connection
-    /// point, so there is nothing to connect; `Err` when one refuses.
-    /// Call it on the UI thread: messages are only forwarded there.
+    /// Component side first (`plugprovider.cpp`).  `Ok(None)` when either
+    /// side has no connection point.  Call on the UI thread: that is the
+    /// only thread `notify` forwards on.
     pub(crate) fn new(
         component: &ComPtr<IComponent>,
         controller: &ComPtr<IEditController>,
@@ -144,7 +130,6 @@ impl Connection {
         Self::between(component, controller).map(Some)
     }
 
-    /// Connects two connection points, as [`Self::new`].
     fn between(
         component: ComPtr<IConnectionPoint>,
         controller: ComPtr<IConnectionPoint>,
@@ -164,7 +149,6 @@ impl Connection {
         Ok(connection)
     }
 
-    /// How many messages went through, both ways.
     #[cfg(test)]
     pub(crate) fn forwarded(&self) -> usize {
         self.component_side.forwarded.load(Ordering::Relaxed)

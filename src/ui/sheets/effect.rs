@@ -1,11 +1,6 @@
-//! The effect sheet's body (`docs/ui-spec.md` §6.1): what the effect is,
-//! its state and latency, *Wet*, *Editor*, *Reset to defaults* and
-//! *Remove* above the controls the plugin reports.
-//!
-//! The header above (`sheets.rs`) already holds the effect's *On* /
-//! *Bypass*.  A plugin that draws its own controls, reports none, or did
-//! not load says so here instead of showing an empty list.  Every change
-//! goes through a `RigWerkApp` method: the sheet never calls the engine.
+//! The effect sheet.  Every change goes through a `RigWerkApp` method.
+//! A plugin that draws its own controls, reports none, or did not load
+//! says so here instead of an empty list.
 
 use eframe::egui;
 use egui::{Align, CornerRadius, Layout, RichText, Sense, Stroke, Vec2};
@@ -53,10 +48,9 @@ pub(crate) fn state_word(bypass: bool, failed: bool, loaded: bool) -> &'static s
     }
 }
 
-/// The header button's label and whether it can be pressed.  An effect that
-/// has not been opened yet may still have an editor: only a loaded plugin
-/// knows, so an editor-capable format loads it on the way.  LV2 has no
-/// editor here, so its unopened slot loads for the controls instead.
+/// Only a loaded plugin knows whether it has an editor, so an
+/// editor-capable format loads on the way.  LV2 has no editor here, so
+/// its unopened slot loads for the controls instead.
 pub(crate) fn editor_button(view: &PluginView) -> (&'static str, bool) {
     let failed = view.error.is_some();
     if view.has_editor {
@@ -95,7 +89,6 @@ pub(crate) fn control_value(parameter: &PluginParamView) -> String {
 }
 
 impl RigWerkApp {
-    /// The effect sheet body for effect `index` of path `path`.
     pub(crate) fn effect_sheet(&mut self, ui: &mut egui::Ui, path: usize, index: usize) {
         let views = self.engine_plugin_views(path);
         let Some(view) = views.get(index) else {

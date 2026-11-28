@@ -1,12 +1,5 @@
-//! Small controls shared by several screens: labels, buttons, the
-//! segmented control, meters and sliders.
-//!
-//! The outline button and the text field are the plain action button and
-//! the one-line input everywhere; they share one height so they line up.
-//!
-//! The console kit (fader, meter, chain row, segmented control, chip, path
-//! dot, popover) follows `docs/ui-spec.md` §4.  Those modules read
-//! [`palette`] and [`font`]; the helpers below are shared by every screen.
+//! Controls shared by several screens.  The outline button and the text
+//! field share one height so they line up.
 
 mod button;
 mod chain_row;
@@ -61,7 +54,6 @@ thread_local! {
     static LAYOUTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Accent ring on a focused control, from the active palette.
 pub(crate) fn palette_focus(ui: &egui::Ui, response: &egui::Response, rect: Rect) {
     if response.has_focus() {
         ui.painter().rect_stroke(
@@ -87,7 +79,6 @@ pub(crate) fn mono(text: impl Into<String>, color: Color32, size: f32) -> RichTe
         .color(color)
 }
 
-/// The status bar's and Diagnostics' name for the engine state.
 pub(crate) fn engine_state_label(state: EngineState) -> &'static str {
     match state {
         EngineState::Preview => "Demo",
@@ -99,16 +90,9 @@ pub(crate) fn engine_state_label(state: EngineState) -> &'static str {
     }
 }
 
-/// The *Driver panel* chip for one ASIO side.  `ready` is whether the
-/// running bridge has that driver open: until then the button is disabled and
-/// says why.  A click returns `true`, and the caller posts the request.
-///
 /// `ready` is true only while a live ASIO driver is open, so the enabled
-/// half of this control cannot be exercised headlessly; the caller hides the
-/// chip when the side is not ASIO at all.
-///
-/// The strings stay with the site: the input strip and the output sheet word
-/// the hint differently and the strip wants the full width.
+/// half cannot be exercised headlessly.  The caller hides the chip when
+/// the side is not ASIO.
 pub(crate) fn asio_panel_chip(
     ui: &mut egui::Ui,
     ready: bool,
@@ -136,8 +120,6 @@ pub(crate) fn status_dot(ui: &mut egui::Ui, color: Color32) {
     ui.painter().circle_filled(rect.center(), 2.2, color);
 }
 
-/// A labelled bar: the name on the left, a formatted value in monospace on the
-/// right, and a 4 px bar underneath filled to `fraction`.
 pub(crate) fn progress_line(
     ui: &mut egui::Ui,
     label: &str,
@@ -163,13 +145,11 @@ pub(crate) fn progress_line(
         .rect_filled(filled, CornerRadius::same(2), with_alpha(color, 220));
 }
 
-/// A section heading in a sheet: medium sans in `text3`, then 3 pt.
 pub(crate) fn heading(ui: &mut egui::Ui, text: &str, colours: &Palette) {
     section(ui, text, colours, Face::SansMedium, 3.0);
 }
 
-/// The gate's section heading: body weight and 4 pt below, quieter beside
-/// its large knobs than [`heading`].
+/// Quieter beside the gate's knobs than [`heading`].
 pub(crate) fn quiet_heading(ui: &mut egui::Ui, text: &str, colours: &Palette) {
     section(ui, text, colours, Face::Sans, 4.0);
 }
@@ -183,9 +163,6 @@ fn section(ui: &mut egui::Ui, text: &str, colours: &Palette, face: Face, gap: f3
     ui.add_space(gap);
 }
 
-/// A level slider and its readout.  `min_db` and `max_db` are the range the
-/// screen allows (a path's or an output's), `colour` is the track's accent,
-/// and `hint` says what the level applies to.
 pub(crate) fn level_row(
     ui: &mut egui::Ui,
     level: &mut f32,
@@ -227,7 +204,6 @@ pub(crate) fn level_row(
     });
 }
 
-/// The width of `text` laid out on one line in `font`.
 pub(crate) fn text_width(ui: &egui::Ui, text: &str, font: &FontId) -> f32 {
     #[cfg(test)]
     LAYOUTS.with(|count| count.set(count.get() + 1));
@@ -237,11 +213,8 @@ pub(crate) fn text_width(ui: &egui::Ui, text: &str, font: &FontId) -> f32 {
         .x
 }
 
-/// `text` shortened with "…" until it fits `max_width` in `font`.
-///
 /// A longer prefix plus the ellipsis is never narrower, so the longest
-/// prefix that fits is found by binary search: one layout for the whole
-/// string and a logarithmic handful more.
+/// prefix that fits is a binary search.
 pub(crate) fn fit_text(ui: &egui::Ui, text: &str, font: &FontId, max_width: f32) -> String {
     if text_width(ui, text, font) <= max_width {
         return text.to_owned();
@@ -264,7 +237,6 @@ pub(crate) fn fit_text(ui: &egui::Ui, text: &str, font: &FontId, max_width: f32)
     fitted
 }
 
-/// `text` cut to its first `keep` characters.
 fn prefix(text: &str, keep: usize) -> &str {
     match text.char_indices().nth(keep) {
         Some((index, _)) => &text[..index],
@@ -272,7 +244,6 @@ fn prefix(text: &str, keep: usize) -> &str {
     }
 }
 
-/// Whether `text`'s first `keep` characters and an ellipsis fit.
 fn prefix_fits(ui: &egui::Ui, text: &str, keep: usize, font: &FontId, max_width: f32) -> bool {
     let prefix = prefix(text, keep);
     let mut candidate = String::with_capacity(prefix.len() + 3);

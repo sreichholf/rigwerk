@@ -1,30 +1,9 @@
-//! VST3, CLAP and LV2 effect chains, one per signal path.
+//! One effect chain per signal path (VST3, CLAP, LV2).
 //!
-//! Plugins are loaded through RigWerk's own VST3 host in [`super::vst3`], the
-//! CLAP host in [`super::clap`] or the LV2 host in [`super::lv2`]; each path's
-//! chain lives on that path in [`super::shared::Shared`] so the playback
-//! callback can process it.  The UI only ever holds descriptors, never the
-//! plugin objects themselves.
-//!
-//! Each loaded plugin is split in two (`handle`): the processor the chain's
-//! slot runs on the audio thread, and the [`PluginHandle`] the UI reaches
-//! through the published effect links.  The handle keeps the views, the
-//! saved values and the state blob behind its own UI-only lock.
-//!
-//! Three things are not format-specific and live here rather than in a host:
-//! `thread` records the plugin main thread and says where a plugin may be
-//! destroyed, `state` is the outcome CLAP and LV2 state captures return, and
-//! `host` is the UI half's one host contract with the bookkeeping every host
-//! shares.
-//!
-//! Each chain is split the same way: the runtime the audio thread owns
-//! (`chain`) and the model the UI edits (`model`), which sends structural
-//! edits as commands through a queue (`queue`) and gets the slots the
-//! runtime let go of back the same way.  No lock is shared between the two
-//! sides.  A slot a thread may not destroy plugins on lands in the engine's
-//! park (`slot::SlotPark`, one per engine and shared by its runs), which the
-//! recorded main thread drains; a slot whose plugin is stranded is leaked
-//! there instead of destroyed.
+//! The UI holds descriptors and [`PluginHandle`]s, never a processor.  No
+//! lock is shared with the audio thread, which never loads or destroys a
+//! plugin.  A slot it may still be inside (`process` never returned) is
+//! leaked, not destroyed.
 
 mod audio_thread;
 mod chain;

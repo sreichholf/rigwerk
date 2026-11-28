@@ -1,8 +1,5 @@
-//! The window shell: title bar, status bar, error banner, and the sheet
-//! and drawer hosts.
-//!
-//! The console, the tuner or Setup draws in the middle.  Sessions are the
-//! menu; Diagnostics is a sheet.
+//! The window shell: title bar, status bar, banner, and the sheet and
+//! drawer hosts.
 
 use std::time::Instant;
 
@@ -19,7 +16,7 @@ use crate::ui::theme::{font, palette, Face, TypeRole};
 use crate::ui::widgets::engine_state_label;
 
 const DRAWER_W: f32 = 460.0;
-/// How far the sheet's resize handle reaches, above the edge and inside it.
+/// How far the sheet's resize handle reaches, above the edge and inside.
 const GRAB: f32 = 10.0;
 
 impl RigWerkApp {
@@ -178,9 +175,6 @@ impl RigWerkApp {
         });
     }
 
-    /// The one line a preset that loaded heavier than the DSP budget gets:
-    /// what every path's NAM blocks project together, the heaviest blocks
-    /// and their paths, and the one click that bypasses the suggested set.
     /// It never bypasses anything by itself.
     pub(crate) fn nam_banner(&mut self, ui: &mut egui::Ui) {
         let colours = palette(ui.ctx());
@@ -222,8 +216,7 @@ impl RigWerkApp {
             }
         });
         if bypass {
-            // Checks again: the banner stays while the paths still do not
-            // fit.
+            // The banner stays while the paths still do not fit.
             self.bypass_suggested_nam();
         } else if dismiss {
             self.nam_warning = None;
@@ -236,9 +229,8 @@ impl RigWerkApp {
             || (self.chrome.error_title.is_some() && !self.chrome.error_dismissed)
     }
 
-    /// The status bar: readings on the left, the issue count and *Log* on
-    /// the right.  The right side is laid out first, so a long log line is
-    /// cut short instead of running under it.
+    /// The right side is laid out first, so a long line is cut instead of
+    /// running under it.
     pub(crate) fn status_bar(&mut self, ui: &mut egui::Ui) {
         let colours = palette(ui.ctx());
         let now = Instant::now();
@@ -355,8 +347,8 @@ impl RigWerkApp {
         } else {
             format!("{} → {}", rate_label(in_rate), rate_label(out_rate))
         };
-        // While the bridge runs, a rate the native PipeWire path only asked
-        // for is marked: the graph has not read its own yet.
+        // A rate the native path only asked for is marked: the graph has not
+        // read its own yet.
         if self.engine_state() == EngineState::Running
             && (!self.snapshot.input_rate_reported || !self.snapshot.output_rate_reported)
         {
@@ -377,10 +369,9 @@ impl RigWerkApp {
         } else {
             self.buffer_size
         };
-        // The published quantum is the number, even before it is a reading: a
-        // native low-latency start asks for 64 while the setting may still say
-        // 128, and the line must not print the setting and then flip.  Only
-        // the `(asked)` mark tells the two apart.
+        // The published quantum is the number even before it is a reading,
+        // so the line does not print the setting and then flip.  Only the
+        // `(asked)` mark tells the two apart.
         let output = if self.snapshot.output_step_frames > 0 {
             self.snapshot.output_step_frames as usize
         } else {
@@ -391,8 +382,7 @@ impl RigWerkApp {
         } else {
             format!("{input} / {output} smp")
         };
-        // Same rule as the driver line: a size that is only the request is
-        // marked while the bridge runs.
+        // A size that is only the request is marked while the bridge runs.
         if self.engine_state() == EngineState::Running && !(input_read && output_read) {
             line.push_str(" (asked)");
         }
@@ -441,14 +431,14 @@ impl RigWerkApp {
             return;
         }
         let colours = palette(ctx);
-        // `content_rect` is already the console, under the title bar and
-        // above the status bar.  The sheet grows up into that area.
+        // `content_rect` is the console, under the title bar and above the
+        // status bar.  The sheet grows up into that area.
         let screen = ctx.content_rect();
         let available = screen.height().max(1.0);
         let mut height = self.sheet_draw_height(available);
         let top = screen.bottom() - height;
-        // Half the grab sits in the gap above the sheet, so the edge
-        // itself is the handle.  At the top of the console it stays inside.
+        // Half the grab sits in the gap above the sheet, so the edge is the
+        // handle.  At the top of the console it stays inside.
         let overhang = GRAB.min((top - screen.top()).max(0.0));
         let origin = egui::pos2(screen.left(), top - overhang);
         egui::Area::new(egui::Id::unique("sheet"))
@@ -459,15 +449,15 @@ impl RigWerkApp {
                 ui.set_width(screen.width());
                 let fill =
                     egui::Rect::from_min_max(egui::pos2(screen.left(), top), screen.right_bottom());
-                // Under the header and the body, so a click on the empty
-                // part of the sheet does not land on a strip behind it.
+                // A click on the empty part of the sheet must not land on a
+                // strip behind it.
                 let _ = ui.interact(fill, ui.scope_id().with("sheet_fill"), egui::Sense::click());
                 let (_grab_rect, grab) = ui.allocate_exact_size(
                     Vec2::new(screen.width(), overhang + GRAB),
                     egui::Sense::drag(),
                 );
-                // Drag only, so the shared hand rule does not cover it.
-                // The vertical resize is this edge's own cursor.
+                // Drag only, so the shared hand rule does not cover it.  The
+                // vertical resize is this edge's own cursor.
                 let grab = grab
                     .on_hover_text("Drag to change the height")
                     .on_hover_and_drag_cursor(egui::CursorIcon::ResizeVertical);

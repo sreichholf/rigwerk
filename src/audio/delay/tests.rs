@@ -25,7 +25,6 @@ fn a_line_delays_by_whole_frames_and_starts_silent() {
     }
     assert_eq!(line.read(0)[0], 10.0);
     assert_eq!(line.read(4)[0], 6.0);
-    // Past the capacity: silence.
     assert_eq!(line.read(5)[0], 0.0);
     line.reset();
     assert_eq!(line.read(0), [0.0, 0.0]);
@@ -56,8 +55,8 @@ fn a_tap_crossfades_to_a_new_delay_and_settles() {
         out.push(tap.next(&line, 0)[0]);
     }
     assert_eq!(out[49], 49.0);
-    // The fade moves from 0 to 10 frames behind over 20 samples: never a
-    // jump bigger than the ramp's own step plus the fade's share.
+    // 0 to 10 frames behind over 20 samples: the step stays within the
+    // ramp's own step plus the fade's share.
     let largest = out
         .windows(2)
         .map(|pair| (pair[1] - pair[0]).abs())

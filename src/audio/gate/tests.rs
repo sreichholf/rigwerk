@@ -40,10 +40,8 @@ fn db_conversion_matches_amplitude() {
 
 #[test]
 fn pole_coeff_is_one_at_zero_time_and_decays() {
-    // One sample time constant → e^{-1}.
     let c = pole_coeff(1.0 / RATE as f32, RATE);
     assert!((c - (-1.0f32).exp()).abs() < 1.0e-5);
-    // Longer τ → closer to 1 (slower).
     assert!(pole_coeff(0.1, RATE) > pole_coeff(0.01, RATE));
 }
 
@@ -74,7 +72,7 @@ fn silence_stays_at_the_range_floor() {
 #[test]
 fn a_loud_signal_opens_toward_unity() {
     let mut gate = loud_gate();
-    // Well above −40 dBFS open threshold (0.01).
+    // 0.25 is well above the -40 dBFS (0.01) open threshold.
     run(&mut gate, 0.25, RATE as usize / 50);
     assert_eq!(gate.phase(), GatePhase::Open);
     assert!(gate.gain() > 0.95, "gain {}", gate.gain());
@@ -86,7 +84,7 @@ fn a_loud_signal_opens_toward_unity() {
 #[test]
 fn hysteresis_keeps_a_closed_gate_closed_between_thresholds() {
     let mut gate = loud_gate();
-    // Open at −40 dB (0.01), close at −46 dB (~0.005).  Midway ≈ 0.007.
+    // -43 dB sits between open (-40) and close (-46).
     let mid = db_to_amp(-43.0);
     run(&mut gate, mid, RATE as usize / 10);
     assert_eq!(gate.phase(), GatePhase::Closed);
@@ -99,18 +97,15 @@ fn hysteresis_keeps_an_open_gate_open_between_thresholds() {
     run(&mut gate, 0.25, RATE as usize / 50);
     assert_eq!(gate.phase(), GatePhase::Open);
     let mid = db_to_amp(-43.0);
-    // Stay in the hysteresis band long enough that a no-hysteresis gate
-    // would have closed; ours must remain Open (or Holding only after
-    // dropping below close — mid is above close).
+    // Long enough that a gate without hysteresis would have closed.  Mid
+    // stays above the close threshold, so this must remain Open.
     run(&mut gate, mid, RATE as usize / 10);
     assert_eq!(gate.phase(), GatePhase::Open);
     assert!(gate.gain() > 0.9);
 }
 
-/// Silence long enough for the detector envelope to fall below the close
-/// threshold (−46 dB from a 0.25 peak with 20 ms detector release).
+/// Silence until the 20 ms detector falls below close (-46 dB from 0.25).
 fn wait_until_holding(gate: &mut NoiseGate) {
-    // ~100 ms of silence is several detector time constants below close.
     for _ in 0..(RATE as usize / 10) {
         let _ = gate.process(0.0, 0.0);
         if gate.phase() == GatePhase::Holding || gate.phase() == GatePhase::Closed {
@@ -126,7 +121,7 @@ fn hold_delays_the_close_after_the_signal_drops() {
     assert_eq!(gate.phase(), GatePhase::Open);
     wait_until_holding(&mut gate);
     assert_eq!(gate.phase(), GatePhase::Holding);
-    // Hold is 20 ms (= 960 samples). Finish that, then a few more.
+    // 20 ms hold is 960 samples; 1200 finishes it.
     run(&mut gate, 0.0, 1_200);
     assert_eq!(gate.phase(), GatePhase::Closed);
 }
@@ -163,13 +158,10 @@ fn gain_release_follows_the_time_constant_once_closed() {
     let open_gain = gate.gain();
     assert!(open_gain > 0.95);
 
-    // Wait until the detector has fallen and the phase is Closed, then
-    // measure one release τ of gain motion from a known starting gain.
     wait_until_holding(&mut gate);
-    // hold_ms is 0, so Closing is immediate once the envelope is low.
+    // hold_ms is 0, so the phase is Closed once the envelope drops.
     assert_eq!(gate.phase(), GatePhase::Closed);
-    // Snap the smoothed gain back to the open value so the release τ is
-    // measured cleanly (envelope already below close).
+    // Measure release from a known gain; the envelope is already below close.
     gate.gain = open_gain;
     let release_samples = (0.050 * RATE as f32).round() as usize;
     run(&mut gate, 0.0, release_samples);
@@ -187,7 +179,7 @@ fn attack_rises_most_of_the_way_in_one_time_constant() {
     let mut gate = loud_gate();
     let attack_samples = (0.001 * RATE as f32).round() as usize;
     run(&mut gate, 0.5, attack_samples);
-    // From the floor (~0.001) toward 1, one τ ≈ 63% of the gap → ~0.63.
+    // One τ from the floor covers ~63% of the gap to unity.
     assert!(
         gate.gain() > 0.55,
         "after one attack τ gain should be well up, got {}",
@@ -198,7 +190,6 @@ fn attack_rises_most_of_the_way_in_one_time_constant() {
 #[test]
 fn stereo_link_uses_the_louder_channel() {
     let mut gate = loud_gate();
-    // Only the right channel is loud.
     for _ in 0..RATE as usize / 50 {
         let _ = gate.process(0.0, 0.25);
     }
@@ -262,20 +253,16 @@ fn detector_constants_are_sensible() {
 #[test]
 fn the_reduction_is_the_deepest_gain_since_it_was_last_taken() {
     let mut gate = loud_gate();
-    // Closed in silence: the full range.
     run(&mut gate, 0.0, RATE as usize / 10);
     let closed = gate.take_reduction_db();
     assert!((closed - 60.0).abs() < 0.1, "closed {closed}");
-    // The first loud block counts the deep gain it opened from (one
-    // attack step above the floor).
+    // The opening block still counts the gain it left the floor from.
     run(&mut gate, 0.25, RATE as usize / 50);
     let opening = gate.take_reduction_db();
     assert!(opening > 20.0 && opening < closed, "opening {opening}");
-    // Open the whole block: next to nothing.
     run(&mut gate, 0.25, RATE as usize / 50);
     let open = gate.take_reduction_db();
     assert!((0.0..0.5).contains(&open), "open {open}");
-    // Nothing processed since the last take.
     assert_eq!(gate.take_reduction_db(), 0.0);
 }
 
@@ -304,13 +291,11 @@ fn a_keyed_gate_follows_its_key_not_its_signal() {
         },
         RATE,
     );
-    // A loud signal with a silent key: the gate stays closed.
     for _ in 0..RATE as usize / 10 {
         let _ = gate.process_keyed(0.25, 0.25, 0.0);
     }
     assert_eq!(gate.phase(), GatePhase::Closed);
     assert!(gate.gain() < 0.01, "gain {}", gate.gain());
-    // A loud key opens it over a silent signal.
     for _ in 0..RATE as usize / 50 {
         let _ = gate.process_keyed(0.0, 0.0, 0.25);
     }

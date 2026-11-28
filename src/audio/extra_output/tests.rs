@@ -1,5 +1,3 @@
-//! Unit tests for generic extra output playback (ring → device).
-
 use std::sync::atomic::Ordering;
 
 use super::super::output::write_frame;

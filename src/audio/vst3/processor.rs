@@ -1,19 +1,10 @@
-//! The audio-thread half of a loaded VST3 plugin: `setProcessing` and
-//! `process` on its `IAudioProcessor`.
+//! Audio-thread half: `setProcessing` and `process`.  Nothing here
+//! allocates, locks, or frees, and it never touches the controller or
+//! its UI lock.
 //!
-//! UI parameter values arrive through the transfer queue and go into the
-//! block's `inputParameterChanges`; what the plugin writes into
-//! `outputParameterChanges` goes back to the UI through the other queue,
-//! where the controller and the views get it.  A skipped effect with
-//! values queued flushes them with a `numSamples = 0` block, so a value set
-//! while bypassed still reaches the processor (and its state).  Values a
-//! block the plugin refused took are kept and go with the next block; only
-//! values a block the plugin accepted carried count as applied (the push
-//! count the UI side's saves wait for).
-//!
-//! Nothing here allocates, locks or frees: the bus buffers, the change
-//! lists, the kept values and the process context are built at load, and a
-//! failure is a `tresult`.  The processor never touches the controller or its UI lock.
+//! A skipped effect flushes queued values with `numSamples = 0`.  Values
+//! from a block the plugin refused are kept for the next block.  Only a
+//! block the plugin accepted counts as applied.
 
 use std::sync::Arc;
 
@@ -32,9 +23,8 @@ use super::module::Vst3Module;
 use super::params::{EmptyEvents, ParameterChanges, IN_POINTS, OUT_POINTS};
 use super::{K_REALTIME, K_SAMPLE32};
 
-/// The audio buses a plugin was set up with: the channel count of every
-/// input and output bus, and which bus is the main one.  The main input,
-/// if there is one, and the main output have one or two channels.
+/// Channel counts, and which bus is main.  The main input, if any, and
+/// the main output have one or two channels.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct BusLayout {
     pub(crate) inputs: Vec<usize>,
@@ -43,8 +33,6 @@ pub(crate) struct BusLayout {
     pub(crate) main_out: usize,
 }
 
-/// Every channel of every audio bus, [`MAX_BLOCK`] samples each, and the
-/// `AudioBusBuffers` that point into them.
 struct BusBuffers {
     samples: Box<[f32]>,
     pointers: Box<[*mut f32]>,
@@ -121,8 +109,6 @@ impl BusBuffers {
         &mut self.samples[index * MAX_BLOCK..(index + 1) * MAX_BLOCK]
     }
 
-    /// Fills the main input from `left`/`right` (mono: their average) and
-    /// silences every other input channel and every output channel.
     fn fill(&mut self, left: &[f32], right: &[f32], count: usize) {
         self.samples.fill(0.0);
         let Some(main) = self.main_in else {
@@ -140,7 +126,6 @@ impl BusBuffers {
         }
     }
 
-    /// Copies the main output back (mono: to both sides).
     fn drain(&mut self, left: &mut [f32], right: &mut [f32], count: usize) {
         let (start, channels) = self.out_start[self.main_out];
         if channels == 1 {
@@ -154,8 +139,8 @@ impl BusBuffers {
     }
 }
 
-/// The audio-thread half.  It lives in the chain's slot; the UI only drops
-/// it, on teardown, after the slot left every chain.
+/// Lives in the chain's slot.  The UI drops it on teardown, after the
+/// slot has left every chain.
 pub(crate) struct Vst3Processor {
     processor: ComPtr<IAudioProcessor>,
     from_ui: ParamReceiver,
@@ -174,8 +159,8 @@ pub(crate) struct Vst3Processor {
 }
 
 impl Vst3Processor {
-    /// Builds the processor for a set-up plugin (allocates; UI thread).
-    /// `context` already holds the rate and what the plugin asked for.
+    /// Allocates.  UI thread.  `context` already holds the rate and what
+    /// the plugin asked for.
     pub(crate) fn new(
         processor: ComPtr<IAudioProcessor>,
         ids: &Arc<ParamIds>,
@@ -199,8 +184,7 @@ impl Vst3Processor {
         }
     }
 
-    /// `setProcessing(true)`.  `kNotImplemented` is fine: the call is a
-    /// notice some plugins do not need.
+    /// `kNotImplemented` is fine: some plugins do not implement the call.
     pub(crate) fn start(&mut self) -> Result<(), ProcessFailure> {
         // SAFETY: an active, set-up processor.
         let result = unsafe { self.processor.setProcessing(1) };
@@ -211,15 +195,12 @@ impl Vst3Processor {
         }
     }
 
-    /// `setProcessing(false)`.
     pub(crate) fn stop(&mut self) {
         // SAFETY: as in `start`.
         unsafe { self.processor.setProcessing(0) };
     }
 
-    /// Runs one chunk of at most [`MAX_BLOCK`] frames in place.  The queued
-    /// UI values go into the block's input changes; the plugin's output
-    /// changes go to the UI.  Only call it between a successful
+    /// At most [`MAX_BLOCK`] frames, in place.  Only between a successful
     /// [`Self::start`] and [`Self::stop`].
     pub(crate) fn process(
         &mut self,
@@ -239,13 +220,10 @@ impl Vst3Processor {
         Ok(())
     }
 
-    /// For a processing effect the chain skips (bypass, mix at 0): hands
-    /// queued UI values to a `numSamples = 0` block with no buses (the
-    /// SDK's flush, `FlushParamTest`), so they reach the processor without
-    /// audio.  Does nothing without new values: values an earlier refused
-    /// flush kept go with the next flush that has new ones, or the next
-    /// processed block, so a plugin that refuses empty blocks does not get
-    /// one every chunk.
+    /// Bypass or mix at 0.  Queued values go to a `numSamples = 0` block
+    /// with no buses (SDK flush, `FlushParamTest`).  Without new values it
+    /// does nothing, so a plugin that refuses empty blocks is not flushed
+    /// every chunk.
     pub(crate) fn flush_if_queued(&mut self) {
         if self.from_ui.is_empty() {
             return;
@@ -257,11 +235,10 @@ impl Vst3Processor {
         self.applied(taken, result);
     }
 
-    /// Moves the values a refused block kept, then the transfer's, into
-    /// the input changes, offsets clamped to the block: a newer drained
-    /// value replaces a kept one at the same offset or follows it.
-    /// Returns the push count the drain covers and whether it deferred a
-    /// value, for [`Self::applied`].
+    /// Kept values first, then the transfer.  A newer drained value
+    /// replaces a kept one at the same offset or follows it.  Offsets are
+    /// clamped to the block.  Returns the push count and whether a value
+    /// was deferred, for [`Self::applied`].
     fn take_ui_values(&mut self, count: usize) -> (u64, bool) {
         let Self {
             from_ui,
@@ -284,9 +261,8 @@ impl Vst3Processor {
         (pushed, deferred)
     }
 
-    /// Reports the values up to the drained push count applied, once the
-    /// plugin accepted the block they went into, the drain deferred
-    /// nothing and no value waits for another try.
+    /// Marks the drained push count applied only when the plugin accepted
+    /// the block, the drain deferred nothing, and nothing waits to retry.
     fn applied(&self, (pushed, deferred): (u64, bool), result: i32) {
         // `retry` is not empty after an accepted block when a full change
         // queue dropped a point.
@@ -295,8 +271,8 @@ impl Vst3Processor {
         }
     }
 
-    /// One `process` call over `count` frames of the bus buffers (none
-    /// without `audio`), then the output changes to the UI.
+    /// One `process`.  No buses when `audio` is false (a flush).  Output
+    /// changes go to the UI.
     fn call(&mut self, count: usize, audio: bool) -> i32 {
         self.buses.refresh();
         let buses = |list: &mut [AudioBusBuffers]| {

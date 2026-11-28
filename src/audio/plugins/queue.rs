@@ -1,16 +1,9 @@
-//! A fixed-capacity single-producer single-consumer queue of owned values:
-//! the chain commands the UI sends the audio side, and the slots the audio
-//! side hands back to be destroyed (see `chain`).
+//! Fixed-capacity SPSC queue.  `push`, `peek` and `pop` never allocate or
+//! lock, so either end may sit on the audio thread.
 //!
-//! [`queue`] allocates everything and hands out one [`Producer`] and one
-//! [`Consumer`].  Neither is `Clone`, and both take `&mut self` to move a
-//! value, so each end has one owner at a time; an end may move between
-//! threads with that owner.  `push`, `peek` and `pop` never allocate or
-//! lock, so either end may be on the audio thread.
-//!
-//! Values still queued when the last end drops are passed to the queue's
-//! `release` function, not dropped in place: a plugin slot must not be
-//! destroyed on whichever thread happens to let go last.
+//! Values still queued when the last end drops go to `release`, not
+//! `drop`: a plugin slot must not be destroyed on whichever thread lets
+//! go last.
 
 use std::cell::{Cell, UnsafeCell};
 use std::marker::PhantomData;
@@ -18,7 +11,6 @@ use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// Runs for every value still queued when the last end drops.
 type Release<T> = Box<dyn Fn(T) + Send + Sync>;
 
 /// A queue counter on its own cache line, so the producer's `head` stores
@@ -63,21 +55,17 @@ impl<T> Drop for Inner<T> {
     }
 }
 
-/// The pushing end of a [`queue`].
 pub(crate) struct Producer<T> {
     inner: Arc<Inner<T>>,
 }
 
-/// The popping end of a [`queue`].  Not `Sync`: [`Self::peek`] hands out
-/// `&T`, which two threads sharing one consumer must not both hold.
+/// Not `Sync`: [`Self::peek`] hands out `&T`, which two threads must not
+/// both hold.
 pub(crate) struct Consumer<T> {
     inner: Arc<Inner<T>>,
     _not_sync: PhantomData<Cell<()>>,
 }
 
-/// A queue for at least `capacity` values (rounded up to a power of two,
-/// at least one).  Values left in it when both ends are gone go to
-/// `release`, which may hold an owner they must be handed back to.
 pub(crate) fn queue<T: Send>(
     capacity: usize,
     release: impl Fn(T) + Send + Sync + 'static,
@@ -118,7 +106,6 @@ impl<T> Producer<T> {
         Ok(())
     }
 
-    /// How many more values fit right now (the consumer may free more).
     pub(crate) fn room(&self) -> usize {
         let inner = &*self.inner;
         let head = inner.head.0.load(Ordering::Relaxed);
@@ -126,7 +113,6 @@ impl<T> Producer<T> {
         inner.cells.len() - (head - tail) as usize
     }
 
-    /// Whether every pushed value was popped.
     pub(crate) fn is_empty(&self) -> bool {
         let inner = &*self.inner;
         inner.head.0.load(Ordering::Relaxed) == inner.tail.0.load(Ordering::Acquire)
@@ -134,7 +120,6 @@ impl<T> Producer<T> {
 }
 
 impl<T> Consumer<T> {
-    /// The oldest value, left in the queue.
     pub(crate) fn peek(&self) -> Option<&T> {
         let inner = &*self.inner;
         let tail = inner.tail.0.load(Ordering::Relaxed);
@@ -148,7 +133,6 @@ impl<T> Consumer<T> {
         Some(unsafe { (*inner.cells[(tail & inner.mask) as usize].get()).assume_init_ref() })
     }
 
-    /// Takes the oldest value.
     pub(crate) fn pop(&mut self) -> Option<T> {
         let inner = &*self.inner;
         let tail = inner.tail.0.load(Ordering::Relaxed);

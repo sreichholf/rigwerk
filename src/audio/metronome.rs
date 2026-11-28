@@ -1,56 +1,36 @@
-//! The metronome click.  One generator, owned by the output mixer and
-//! advanced once per output sample.  The mixer adds that sample onto each
-//! device after the safety ceiling; this file does not know about devices.
+//! One click generator.  The mixer adds the sample after the safety
+//! ceiling; this file does not know about devices.
 //!
-//! A rhythm is a fixed bar: how many clicks, and which of them is the one.
-//! The one is higher and louder than every other click.  Where the bar has
-//! an inner pulse (the 3 of 4/4, the 4 of 6/8), that click sits between the
-//! one and a plain beat.  Beat length is `rate * 60 / bpm` samples, and BPM
-//! is the click rate for every rhythm.  Phase starts at 0 and advances by
-//! one sample.  When it reaches the interval it subtracts the interval once
-//! and fires.  A tempo or rhythm change waits for the next beat, and the
-//! leftover phase carries over.  A new rhythm starts its bar there, on the
-//! one.  A click that is still ringing when the next one fires (a restart
-//! right after a stop) is not cut: it moves to a second voice and dies on
-//! its own envelope under the new click.  No heap, no table, no lock.
+//! A tempo or rhythm change waits for the next beat, and the leftover phase
+//! carries.  A new rhythm starts that bar on the one.  A click still ringing
+//! when the next fires moves to a second voice instead of being cut.  No
+//! heap, no table, no lock.
 
 use serde::{Deserialize, Serialize};
 
 use super::limiter::safety_ceiling_linear;
 use super::output_map::{level_gain, DEVICE_LEVEL_MIN_DB};
 
-/// Slowest tempo, BPM.
 pub const METRONOME_BPM_MIN: f32 = 40.0;
-/// Fastest tempo, BPM.
 pub const METRONOME_BPM_MAX: f32 = 240.0;
-/// Tempo a new run starts at, BPM.
 pub const METRONOME_BPM_DEFAULT: f32 = 120.0;
 
-/// Quietest click, dB.  The same floor as the device fader.
+/// Same floor as the device fader.
 pub const CLICK_LEVEL_MIN_DB: f32 = DEVICE_LEVEL_MIN_DB;
-/// Loudest click, dB.  0 dB makes the accent peak the safety ceiling.
+/// 0 dB peaks the accent at the safety ceiling.
 pub const CLICK_LEVEL_MAX_DB: f32 = 0.0;
-/// Click level a new run starts at, dB.
 pub const CLICK_LEVEL_DEFAULT_DB: f32 = -12.0;
 
-/// The one, Hz.
 const ACCENT_HZ: f32 = 1760.0;
-/// An inner accent, Hz.  Quieter and lower than the one.
 const SECONDARY_HZ: f32 = 1175.0;
-/// Every other click, Hz.
 const PULSE_HZ: f32 = 880.0;
-/// Envelope time constant, seconds.  `exp(-t / τ)`.
 const ENVELOPE_SECONDS: f32 = 0.008;
-/// The voice is exact silence once the envelope falls below this.
-/// At this time constant that is about 74 ms, past the point where a
-/// hard cut would still be a click.
+/// Exact silence below this.  At this τ that is ~74 ms, past a clicky cut.
 const ENVELOPE_FLOOR: f32 = 1.0e-4;
-/// An inner accent, as a fraction of the one's peak.
 const SECONDARY_SCALE: f32 = 0.45;
-/// A plain click, as a fraction of the one's peak.
 const PULSE_SCALE: f32 = 0.28;
 
-/// How hard one click in the bar speaks.  The one is [`ClickWeight::Accent`].
+/// The one is [`ClickWeight::Accent`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClickWeight {
     Accent,
@@ -60,8 +40,8 @@ enum ClickWeight {
 
 use ClickWeight::{Accent as A, Pulse as P, Secondary as S};
 
-/// A bar the click can play.  The discriminant is the value stored on the
-/// shared transport.  An unknown value reads as [`Self::FourFour`].
+/// Discriminant is the value stored on the shared transport.  Unknown reads
+/// as [`Self::FourFour`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[repr(u8)]
@@ -78,13 +58,12 @@ pub enum ClickRhythm {
     SevenFour = 10,
     ThreeEight = 11,
     FiveEight = 12,
-    /// 4/4, and any rhythm name this build does not know.
     #[default]
     #[serde(other)]
     FourFour = 0,
 }
 
-/// The rhythms the Mixer offers, most common first.
+/// Offered order, most common first.
 pub const CLICK_RHYTHMS: [ClickRhythm; 13] = [
     ClickRhythm::FourFour,
     ClickRhythm::ThreeFour,
@@ -102,7 +81,6 @@ pub const CLICK_RHYTHMS: [ClickRhythm; 13] = [
 ];
 
 impl ClickRhythm {
-    /// The rhythm stored as `raw`, or 4/4 when `raw` is not one of these.
     pub fn from_u8(raw: u8) -> Self {
         CLICK_RHYTHMS
             .into_iter()
@@ -110,7 +88,6 @@ impl ClickRhythm {
             .unwrap_or(Self::FourFour)
     }
 
-    /// The signature, as the Mixer and Live pages draw it.
     pub fn label(self) -> &'static str {
         match self {
             Self::FourFour => "4/4",
@@ -129,14 +106,13 @@ impl ClickRhythm {
         }
     }
 
-    /// Clicks in one bar.  At least one.
     pub fn clicks(self) -> u8 {
         self.pattern().len() as u8
     }
 
-    /// Beat 1 is the accent.  Inner accents follow the usual grouping:
-    /// 4/4 on 3, 6/8 and 6/4 and 12/8 and 9/8 on each dotted group, 5/4 and
-    /// 5/8 as 3+2, 7/8 as 2+2+3, 7/4 as 4+3.
+    /// Beat 1 is the accent.  Inner accents follow the usual grouping: 4/4
+    /// on 3, 6/8, 6/4, 12/8 and 9/8 on each dotted group, 5/4 and 5/8 as
+    /// 3+2, 7/8 as 2+2+3, 7/4 as 4+3.
     fn weight(self, beat: u8) -> ClickWeight {
         let pattern = self.pattern();
         let index = beat.saturating_sub(1) as usize;
@@ -158,8 +134,6 @@ impl ClickRhythm {
     }
 }
 
-/// A NaN tempo becomes [`METRONOME_BPM_DEFAULT`], then the value is clamped
-/// to [`METRONOME_BPM_MIN`]..=[`METRONOME_BPM_MAX`].
 pub(crate) fn clamp_metronome_bpm(bpm: f32) -> f32 {
     if bpm.is_nan() {
         METRONOME_BPM_DEFAULT
@@ -168,8 +142,6 @@ pub(crate) fn clamp_metronome_bpm(bpm: f32) -> f32 {
     }
 }
 
-/// A NaN click level becomes [`CLICK_LEVEL_DEFAULT_DB`], then the value is
-/// clamped to [`CLICK_LEVEL_MIN_DB`]..=[`CLICK_LEVEL_MAX_DB`].
 pub(crate) fn clamp_click_level_db(db: f32) -> f32 {
     if db.is_nan() {
         CLICK_LEVEL_DEFAULT_DB
@@ -178,13 +150,11 @@ pub(crate) fn clamp_click_level_db(db: f32) -> f32 {
     }
 }
 
-/// Linear click gain, `10^(dB/20)`, as a device level.  0 dB is 1, so the
-/// accent peak is the safety ceiling and the mixer only has to scale.
+/// 0 dB is unity, so the mixer only scales.
 pub(crate) fn click_level_gain(db: f32) -> f32 {
     level_gain(clamp_click_level_db(db))
 }
 
-/// One click sounding: how far into it, and how hard it speaks.
 #[derive(Clone, Copy, Debug)]
 struct Voice {
     on: bool,
@@ -200,7 +170,7 @@ impl Voice {
         weight: ClickWeight::Accent,
     };
 
-    /// The next sample of this click, or exact `0.0` once it has died away.
+    /// Exact `0.0` once the envelope is below the floor.
     #[inline]
     fn next(&mut self, rate: u32, ceiling: f32) -> f32 {
         if !self.on {
@@ -224,36 +194,28 @@ impl Voice {
     }
 }
 
-/// One metronome.  The mixer holds the only value.  The callback calls
-/// [`Self::latch`] and [`Self::scale`] once per block, then [`Self::next`]
-/// once per sample.  None of those allocate.
+/// The mixer holds the only one.  [`Self::latch`] and [`Self::scale`] once
+/// per block, [`Self::next`] once per sample.  None of those allocate.
 pub(crate) struct Metronome {
     running: bool,
-    /// Tempo the current interval was built from.
     bpm: f32,
-    /// Tempo latched for the next beat.
     pending_bpm: f32,
-    /// Rhythm the current beat index counts in.
     rhythm: ClickRhythm,
-    /// Rhythm latched for the next beat.
     pending_rhythm: ClickRhythm,
-    /// A latched tempo or rhythm is still waiting for the beat boundary.
+    /// Waiting for the beat boundary.
     retune: bool,
     /// Samples into the current beat.  0 right after a fire.
     phase: f64,
     /// Samples in the current beat.
     interval: f64,
-    /// 0 when stopped, otherwise the beat that last fired (`1..=clicks`).
+    /// 0 when stopped, otherwise `1..=clicks` of the last fire.
     beat: u8,
-    /// Output rate the voice and the next interval use.
     rate: u32,
-    /// This beat's click.
     voice: Voice,
-    /// The click before it, while it still rings.  Only a restart soon
-    /// after a stop fires that early; at every tempo the envelope is long
-    /// gone before the next beat.  A third click that early replaces it.
+    /// The previous click while it still rings.  Only a restart soon after
+    /// a stop overlaps; a third click that early replaces this one.
     tail: Voice,
-    /// The safety ceiling, linear.  Read once here, not per sample.
+    /// Linear safety ceiling, read once.
     ceiling: f32,
 }
 
@@ -276,14 +238,12 @@ impl Metronome {
         }
     }
 
-    /// 0 when stopped, otherwise `1..=clicks`.
     pub(crate) fn beat(&self) -> u8 {
         self.beat
     }
 
-    /// Keeps the rest of this beat the same length when the output rate
-    /// changes.  `ratio` is `new_rate / old_rate`.  The next beat is built
-    /// from the new rate in [`Self::latch`].
+    /// `ratio` is `new_rate / old_rate`.  The rest of this beat keeps its
+    /// length; [`Self::latch`] builds the next beat from the new rate.
     pub(crate) fn scale(&mut self, ratio: f64) {
         if ratio.is_finite() && ratio > 0.0 {
             self.phase *= ratio;
@@ -291,26 +251,19 @@ impl Metronome {
         }
     }
 
-    /// The rhythm the current beat belongs to.  A change latched for the
-    /// next beat stays pending until [`Self::fire`].
+    /// The current beat's rhythm.  A latched change stays pending until
+    /// [`Self::fire`].
     pub(crate) fn rhythm(&self) -> ClickRhythm {
         self.rhythm
     }
 
-    /// Latches the block's transport.  Starting fires beat 1 on the next
-    /// sample, and a click from before a stop that still rings plays out
-    /// under it.  Stopping clears the phase and the beat, and leaves a click
-    /// that is already sounding to die on its envelope.  A tempo or rhythm
-    /// change on a click that is already running waits for the next beat;
-    /// a new rhythm's bar starts on the one at that beat.
-    /// Tempo is whatever the app stored; [`clamp_metronome_bpm`] runs when
-    /// preferences load and when the field is edited.
+    /// Does not clamp tempo.  [`clamp_metronome_bpm`] runs when preferences
+    /// load and when the field is edited.
     pub(crate) fn latch(&mut self, running: bool, bpm: f32, rhythm: ClickRhythm, rate: u32) {
         let rate = rate.max(1);
         if rate != self.rate {
-            // A sounding click counts samples at the old rate.  Rescale
-            // them, as [`Self::scale`] does the beat, so it keeps its time
-            // and its phase instead of jumping.
+            // A sounding click counts samples at the old rate.  Rescale, as
+            // [`Self::scale`] does the beat, so it keeps its time.
             let ratio = rate as f64 / self.rate as f64;
             for voice in [&mut self.voice, &mut self.tail] {
                 voice.n = (voice.n as f64 * ratio).round() as u32;
@@ -344,10 +297,8 @@ impl Metronome {
         self.retune = bpm != self.bpm || rhythm != self.rhythm;
     }
 
-    /// One output sample.  Exact `0.0` between clicks, and once a click that
-    /// was sounding at stop has fallen through the envelope floor.  Stopping
-    /// does not start another click.  The caller multiplies by the click
-    /// gain; this is the voice alone.
+    /// The voice alone: the caller applies click gain.  Exact `0.0` once
+    /// the envelope has fallen through the floor.
     #[inline]
     pub(crate) fn next(&mut self) -> f32 {
         if self.running {
@@ -387,8 +338,7 @@ impl Metronome {
         };
     }
 
-    /// Both voices, or exact `0.0` once they have died away.  A silent
-    /// tail adds nothing, so a lone click is its own sample.
+    /// A silent tail is not added, so a lone click is its own sample.
     #[inline]
     fn voice(&mut self) -> f32 {
         let sample = self.voice.next(self.rate, self.ceiling);

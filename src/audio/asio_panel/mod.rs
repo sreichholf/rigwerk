@@ -1,27 +1,20 @@
-//! A request to open an ASIO driver's control panel.
-//!
-//! The UI thread only sets a flag.  The bridge thread that created the
-//! driver takes the flag between callbacks and is the one that calls
-//! `controlPanel`.  Nothing here opens a driver, so the flag can be tested
-//! without hardware.  The call itself stays in the Windows ASIO bridge.
+//! The UI sets a flag.  The bridge thread that owns the driver calls
+//! `controlPanel` between callbacks.  Nothing here opens a driver.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-/// Which bridge side owns the driver.  Two ASIO devices are two drivers,
-/// so each side has its own request.
+/// Two ASIO devices are two drivers, so each side has its own request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AsioPanelSide {
     Input,
     Output,
 }
 
-/// Flags the UI sets and the bridge clears.  One per run, on the shared
-/// state both sides already hold.
+/// The UI sets these; the bridge clears them.  One per run.
 pub(crate) struct AsioPanelRequests {
     input: AtomicBool,
     output: AtomicBool,
-    /// Bridge threads currently inside `controlPanel`.  More than one when
-    /// the input and output drivers both have a panel open.
+    /// A counter: both drivers can have a panel open.
     open: AtomicUsize,
 }
 
@@ -34,38 +27,33 @@ impl AsioPanelRequests {
         }
     }
 
-    /// The UI side.  A second request before the bridge takes the first
-    /// stays one open.
+    /// A second request before the bridge takes the first stays one open.
     pub(crate) fn request(&self, side: AsioPanelSide) {
         self.flag(side).store(true, Ordering::Release);
     }
 
-    /// The bridge side.  `true` once per request, then the flag is clear.
-    /// Only the Windows bridge calls this; Linux keeps the flag so the
-    /// same type can be tested without a driver.
+    /// `true` once per request.  Linux keeps the method so the flag can be
+    /// tested without a driver.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn take(&self, side: AsioPanelSide) -> bool {
         self.flag(side).swap(false, Ordering::AcqRel)
     }
 
-    /// Drops any request the bridge has not taken.  Does not clear
-    /// [`Self::enter`]: a panel that is already open still has to finish.
+    /// Does not clear an open panel.  One that is already open still finishes.
     pub(crate) fn clear_requests(&self) {
         self.input.store(false, Ordering::Relaxed);
         self.output.store(false, Ordering::Relaxed);
     }
 
-    /// Marks the panel open until the guard drops, including on unwind.
-    /// Only the Windows bridge calls this, around `controlPanel`.
+    /// The guard drops on unwind too.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn enter(&self) -> AsioPanelOpen<'_> {
         let _ = self.open.fetch_add(1, Ordering::AcqRel);
         AsioPanelOpen(self)
     }
 
-    /// Whether a bridge thread is inside `controlPanel`.  The engine uses
-    /// this so a driver that pauses callbacks for its panel is not treated
-    /// as stalled, and so stop waits out the panel.
+    /// A panel that pauses callbacks is not a stalled device, and stop waits
+    /// it out.
     pub(crate) fn is_open(&self) -> bool {
         self.open.load(Ordering::Acquire) > 0
     }
@@ -78,8 +66,6 @@ impl AsioPanelRequests {
     }
 }
 
-/// Clears the open mark when the `controlPanel` call returns.
-/// Only the Windows bridge constructs it.
 #[must_use = "the panel stays marked open until this guard drops"]
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) struct AsioPanelOpen<'a>(&'a AsioPanelRequests);

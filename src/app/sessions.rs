@@ -1,5 +1,3 @@
-//! Saving, loading and deleting sessions (saved device pairs).
-
 use crate::app::devices::{
     device_restore_note, restore_device, restore_extra_output, restore_input, DeviceRestore,
     InputGroup,
@@ -10,7 +8,7 @@ use crate::app::settings::{
 use crate::app::LogTone;
 use crate::app::RigWerkApp;
 
-/// Saved fields a person edits, without the note or the click masks.
+/// The note and the click masks are not part of a session.
 fn setup_key(session: &Session) -> String {
     let mut session = session.clone();
     session.note.clear();
@@ -22,7 +20,6 @@ fn setup_key(session: &Session) -> String {
 }
 
 impl RigWerkApp {
-    /// The session `save_session` would write for the current setup.
     pub(crate) fn capture_session(&self) -> Session {
         let input = self.active_input().clone();
         let output = self.selected_output().clone();
@@ -54,15 +51,12 @@ impl RigWerkApp {
             paths,
             clock_output,
             extra_outputs,
-            // The legacy mix fields are not written.  The metronome stays a
-            // preference: applying a session does not retune it.
+            // The metronome stays a preference: applying a session does not
+            // retune it.
             ..Session::default()
         }
     }
 
-    /// The setup differs from the saved session of this name, or there is
-    /// no saved session with that name.  Click masks are not part of a
-    /// session, so they are left out of the comparison.
     pub(crate) fn session_edited(&self) -> bool {
         let Some(index) = self.session_named(&self.session_name) else {
             return true;
@@ -117,7 +111,6 @@ impl RigWerkApp {
         self.push_log(format!("Saved session “{name}”."), LogTone::Teal);
     }
 
-    /// Sessions are matched by name, ignoring case and surrounding spaces.
     pub(crate) fn session_named(&self, name: &str) -> Option<usize> {
         let name = name.trim();
         self.sessions
@@ -143,8 +136,8 @@ impl RigWerkApp {
     }
 
     pub(crate) fn apply_session(&mut self, index: usize) {
-        // A session from before paths: path 1 from its mix fields, keeping
-        // what it never stored (an EQ or gate) from the first path now.
+        // An old session stores path 1 in its mix fields.  An EQ or gate it
+        // never stored stays the current first path's.
         let first = self.path_slots()[0];
         let current = self.paths[first]
             .as_ref()
@@ -163,8 +156,7 @@ impl RigWerkApp {
             return;
         };
         stored.migrate_paths(&current);
-        // Same check as loading preferences: bad gains, rates and buffers
-        // are replaced here, and the stored session keeps the safe values.
+        // The stored session keeps the safe values.
         sanitize_session(stored);
         let session = stored.clone();
         self.session_name = session.name.clone();
@@ -190,12 +182,8 @@ impl RigWerkApp {
         self.match_paths_result = None;
         self.match_paths_ticks.clear();
         self.match_paths_status = None;
-        // The click is not part of a session: it stays with the physical
-        // device.  Each device the session uses (its clock and each extra output)
-        // gets the mask that device has now, as the clock or as an extra output,
-        // matched by id and backend; a device that is not live gets none.
-        // The session's clock is the output it restores to, or the current
-        // output when that is not found (it stays the clock).
+        // The click is not part of a session.  It stays with the physical
+        // device, matched by id and backend.
         let current_output = self.selected_output();
         let live: Vec<(&str, &str, u8)> = std::iter::once((
             current_output.id.as_str(),
@@ -233,16 +221,15 @@ impl RigWerkApp {
             .iter()
             .cloned()
             .map(|mut extra_output| {
-                // A saved session can name an extra output the scan has
-                // re-enumerated.  Adopt its live id/name before the click
-                // mask lookup and the install.
+                // A scan can re-enumerate an extra output.  Adopt its live id
+                // and name before the click-mask lookup.
                 restore_extra_output(&self.devices.inventory.outputs, &mut extra_output);
                 extra_output.settings.click_mask =
                     live_mask(&extra_output.id, &extra_output.backend);
                 extra_output
             })
             .collect();
-        // The device maps are in the session's path order; installing maps
+        // Device maps are in the session's path order.  Install remaps
         // them onto the slots the paths land in.
         self.install_paths(&session.paths, clock, extra_outputs, 0);
         self.install_match_paths(session.match_paths);
@@ -309,15 +296,14 @@ impl RigWerkApp {
         if self.log_device_restore("Session output", output_label, output_restore) {
             device_missing = true;
         }
-        // A saved device that is not connected is an error. The mix above
+        // A saved device that is not connected is an error.  The mix above
         // was still applied; do not report the session as loaded.
         if !device_missing {
             self.push_log(format!("Loaded session “{}”.", session.name), LogTone::Blue);
         }
     }
 
-    /// Logs a name fallback or a missing device. Returns true when a saved
-    /// device was not found (an empty label is "nothing was stored", not a miss).
+    /// An empty label is nothing stored, not a miss.
     fn log_device_restore(&mut self, role: &str, label: &str, restore: DeviceRestore) -> bool {
         let Some(note) = device_restore_note(role, label, restore) else {
             return false;

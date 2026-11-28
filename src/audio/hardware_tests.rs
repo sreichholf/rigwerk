@@ -1,8 +1,6 @@
-//! Tests that open real audio devices.  They are ignored by default and
-//! only ever play silence.  Run with `cargo test -- --ignored --nocapture`.
+//! Opens real devices.  Ignored by default, and only plays silence.
 
-/// Opens every WASAPI output REAL-style for a moment.  The ring is empty,
-/// so only silence plays.  Run with `cargo test -- --ignored`.
+/// The ring is empty, so only silence plays.
 #[cfg(target_os = "windows")]
 #[test]
 #[ignore = "opens the output devices"]
@@ -35,8 +33,7 @@ fn real_style_opens_the_outputs() {
     }
 }
 
-/// Asks every WASAPI output which engine steps its driver allows, without
-/// opening a stream.  Run with `cargo test probe_reports -- --ignored`.
+/// No stream is opened.
 #[cfg(target_os = "windows")]
 #[test]
 #[ignore = "asks the real output drivers"]
@@ -60,11 +57,7 @@ fn probe_reports_each_output_driver() {
     }
 }
 
-/// Runs the real bridge for three seconds with the output muted, so only
-/// silence plays.  Devices are picked by name:
-/// `RIGWERK_IN` (an ASIO driver, or a system input) and `RIGWERK_OUT`
-/// (an output), optionally `RIGWERK_OUT_BACKEND` (e.g. ASIO or WASAPI).
-/// Run with `cargo test hardware_bridge -- --ignored --nocapture`.
+/// Output muted, so only silence plays.
 #[test]
 #[ignore = "opens real audio devices"]
 fn hardware_bridge() {
@@ -113,7 +106,7 @@ fn hardware_bridge() {
 
     let mut engine = AudioEngine::new(48_000);
     engine.set_master(true, [true, true], true);
-    // RIGWERK_BRIDGE_BUFFER: auto (default), minimum, or a fixed size in ms.
+    // `RIGWERK_BRIDGE_BUFFER`: auto, minimum, or a fixed size in ms.
     match std::env::var("RIGWERK_BRIDGE_BUFFER").as_deref() {
         Ok("minimum") => engine.set_bridge_buffer(super::BufferMode::Minimum, 10.0),
         Ok(ms) if ms.parse::<f32>().is_ok() => {
@@ -121,7 +114,7 @@ fn hardware_bridge() {
         }
         _ => engine.set_bridge_buffer(super::BufferMode::Auto, 10.0),
     }
-    // RIGWERK_EQ=1 runs with every band boosted, to load the EQ fully.
+    // `RIGWERK_EQ=1` boosts every band, so the EQ is fully loaded.
     if std::env::var("RIGWERK_EQ").as_deref() == Ok("1") {
         let mut eq = super::EqSettings::default();
         for band in eq.bands.iter_mut() {
@@ -173,8 +166,7 @@ fn hardware_bridge() {
         snapshot.dropouts
     );
     engine.stop();
-    // Stop is asynchronous now; the devices are not released until the
-    // bridge thread has confirmed teardown.
+    // Stop does not wait.  The devices stay until the bridge confirms teardown.
     for _ in 0..250 {
         if engine.state == EngineState::Idle {
             break;
@@ -192,9 +184,8 @@ fn hardware_bridge() {
     assert!(ring_seen > 0.0, "the input never delivered audio");
 }
 
-/// Runs the IAudioClient3 stream at the driver's default step on the
-/// default output, so the render loop is exercised even where no driver
-/// offers a smaller step.  Only silence plays.
+/// The driver's default step, so the render loop runs even where no
+/// driver offers a smaller one.  Only silence plays.
 #[cfg(target_os = "windows")]
 #[test]
 #[ignore = "opens the default output device"]
@@ -224,11 +215,7 @@ fn real_style_stream_renders_on_the_default_output() {
     );
 }
 
-/// Opens the sink monitor on the default PipeWire sink for a moment and
-/// prints its peak.  It only captures; nothing is played.  The monitor is
-/// passive, so a suspended sink delivers no blocks and reads `None`; play
-/// something on it to see a reading.  Run with
-/// `cargo test sink_monitor_reads -- --ignored --nocapture`.
+/// Capture only.  A suspended sink delivers no blocks and reads `None`.
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "needs a running PipeWire daemon"]
@@ -246,10 +233,8 @@ fn sink_monitor_reads_the_default_sink() {
     assert!(reading.is_none_or(|peak| (0.0..=16.0).contains(&peak)));
 }
 
-/// Starts the PipeWire registry watch and waits for a source or sink to be
-/// added or removed.  Nothing is opened or played.  Create one meanwhile,
-/// e.g. a null sink with `pw-cli create-node adapter`.  Run with
-/// `cargo test registry_watch_sees -- --ignored --nocapture`.
+/// Nothing is opened or played.  Create a node meanwhile, for example a
+/// null sink.
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "needs a running PipeWire daemon"]

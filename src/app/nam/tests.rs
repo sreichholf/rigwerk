@@ -1,7 +1,3 @@
-//! The NAM folder helpers, the loader thread, what a loaded capture
-//! publishes, the block edits and what follows them, the park flush, and
-//! the heavy-preset check over every path.
-
 use super::{
     normalize_models_folder, paste_chord_edge, suggested_bypass, NamAnswer, NamDone, NamInstall,
     NamJob, NamLoader, NamMeasure,

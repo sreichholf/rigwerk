@@ -1,9 +1,5 @@
-//! The stage's unit tests and the always-on part of the phase 0 gate.  The
-//! synthetic material, the scores and the gate live in the submodules;
-//! `harness` is the release-only part (`RIGWERK_PITCH_RENDER`).
-//!
-//! `cargo test` is a debug build, so the always-on set is a subset: one
-//! rate for the gate, a few cases and shifts.
+//! Debug `cargo test` runs a subset: one rate, a few cases and shifts.
+//! The release harness is `harness` (`RIGWERK_PITCH_RENDER`).
 
 mod gate;
 mod harness;

@@ -1,13 +1,5 @@
-//! Tuner: one screen (`docs/ui-spec.md` §3.4).  The note very large, the
-//! cents and the state, the needle or the strobe, the string cells, and one
-//! bottom bar with every setting.  In All strings the strobe and the needle
-//! are one face per string, fitted to the row.  The title bar and the status
-//! bar stay, so the
-//! tuner is entered and left like any other screen.
-//!
-//! The analysis and the frame types live in `audio::tuner`; this module only
-//! draws the frame and edits the screen's settings.  While auto-mute holds
-//! the outputs, a strip under the title bar says so.
+//! The tuner.  It only draws the frame and edits this screen's settings;
+//! the analysis lives in `audio::tuner`.
 
 mod gauge;
 
@@ -26,12 +18,10 @@ use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
 use crate::ui::widgets::{chip, engine_state_label, row_info, segmented, OutlineButton};
 
-/// Gap between string columns.  The strobe row uses it too, so a face sits
-/// on its cell.
+/// The strobe row uses it too, so a face sits on its cell.
 const STRING_COLUMN_GAP: f32 = 6.0;
 
-/// The settings the page was drawn with.  Copying them lets the frame stay
-/// borrowed while the bar collects edits for after the draw.
+/// Copied so the frame stays borrowed while the bar collects edits.
 #[derive(Clone, Copy)]
 struct View {
     preset: Option<usize>,
@@ -49,7 +39,7 @@ impl View {
     }
 }
 
-/// Edits collected while drawing, applied once the frame borrow has ended.
+/// Applied once the frame borrow has ended.
 #[derive(Default)]
 struct Actions {
     preset: Option<Option<usize>>,
@@ -59,14 +49,12 @@ struct Actions {
     listen: Option<TunerListen>,
     auto_mute: Option<bool>,
     tolerance: Option<TunerTolerance>,
-    /// A string cell the user tapped.  Applied once the frame borrow ends.
     pin: Option<usize>,
     start: bool,
 }
 
-/// What the big readout shows.  In All strings mode this is the string the
-/// tuner is following, or the one the user pinned.  The mono reading stays
-/// off that face: a strummed chord's pitch can be a subharmonic of the chord.
+/// The mono reading stays off the All-strings face: a strummed chord's
+/// pitch can be a subharmonic of the chord.
 struct Lead {
     valid: bool,
     string: Option<usize>,
@@ -216,7 +204,6 @@ impl RigWerkApp {
     }
 }
 
-/// The strip under the title bar while auto-mute holds the outputs.
 fn muted_strip(ui: &mut egui::Ui, colours: &Palette) {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::hover());
@@ -237,8 +224,6 @@ fn muted_strip(ui: &mut egui::Ui, colours: &Palette) {
     );
 }
 
-/// The note, its octave, the target and heard frequencies, the cents and
-/// the state.
 fn readout(
     ui: &mut egui::Ui,
     lead: &Lead,
@@ -446,7 +431,6 @@ fn level_readout(level_db: f32) -> String {
     format!("{level_db:.1} dBFS")
 }
 
-/// The level and the confidence as two thin bars under the scale.
 fn level_and_confidence(ui: &mut egui::Ui, lead: &Lead, active: bool, colours: &Palette) {
     let level = if active && lead.level_db.is_finite() {
         ((lead.level_db + 60.0) / 60.0).clamp(0.0, 1.0)
@@ -720,8 +704,6 @@ fn strings_section(
     }
 }
 
-/// The per-string track: a centre tick, the tolerance band across ±50 cents,
-/// and a 3 px mark when the string is sounding and not a ghost.
 fn string_track(
     painter: &egui::Painter,
     cell: Rect,
@@ -811,8 +793,6 @@ fn idle_panel(ui: &mut egui::Ui, state: EngineState, actions: &mut Actions, colo
     }
 }
 
-/// The bottom bar: tuning, A4, the in-tune band, the input, what to listen
-/// to, auto-mute, and the display.
 fn bottom_bar(
     ui: &mut egui::Ui,
     view: &View,

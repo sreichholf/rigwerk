@@ -1,11 +1,5 @@
-//! An output strip: the name and its badge, the *Plays* dots, the
-//! *Metronome* toggle, the buffer line, the limiter's reduction, one meter
-//! bar per channel, the output level and *M*.  A click anywhere else on the
-//! strip opens its output sheet.
-//!
-//! The narrower steps drop the subtitle (step 2), then the dB scale, the
-//! buffer line and the limiter bar, and the badge becomes an icon (step 4).
-//! Hover keeps what a step hides.
+//! An output strip.  Narrower steps drop the subtitle, then the scale,
+//! buffer line and limiter bar.  Hover keeps what a step hides.
 
 use eframe::egui;
 use egui::{CornerRadius, Rect, RichText, Sense, Stroke, Vec2};
@@ -22,7 +16,6 @@ use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, TypeRole};
 use crate::ui::widgets::{horizontal_meter, path_dot, row_info, FaderRange};
 
-/// The limiter's bar reads 0 to this many dB of reduction.
 const LIMITER_RANGE_DB: f32 = 12.0;
 
 impl RigWerkApp {
@@ -129,7 +122,6 @@ impl RigWerkApp {
         }
     }
 
-    /// *Plays*: a dot per path, filled when any of its channels play here.
     fn plays_dots(&mut self, ui: &mut egui::Ui, device: usize, label: bool) {
         let colours = palette(ui.ctx());
         let paths: Vec<(usize, u8, String)> = self
@@ -168,8 +160,7 @@ impl RigWerkApp {
     }
 }
 
-/// *-14.2 LUFS* from the short-term reading, or *— LUFS* until the first
-/// three seconds are in.  The output trim has its own line under the fader.
+/// `— LUFS` until the first three seconds are in.  The trim has its own line.
 fn loudness_line(reading: LoudnessReading) -> String {
     if reading.short_term_lufs > crate::audio::SILENCE_LUFS {
         format!("{:.1} LUFS", reading.short_term_lufs)
@@ -178,7 +169,6 @@ fn loudness_line(reading: LoudnessReading) -> String {
     }
 }
 
-/// The badge as a word, amber with its word while it warns.
 fn badge_chip(ui: &mut egui::Ui, badge: OutputBadge) {
     let colours = palette(ui.ctx());
     let text_font = font(Face::SansMedium, TypeRole::GridHeader);
@@ -215,7 +205,6 @@ fn badge_chip(ui: &mut egui::Ui, badge: OutputBadge) {
     row_info(&response, egui::Role::Label, true, label, None, None);
 }
 
-/// Step 4: the badge as a letter in a box, the word on hover.
 fn badge_icon(ui: &mut egui::Ui, badge: OutputBadge) {
     let colours = palette(ui.ctx());
     let letter = match badge {
@@ -255,7 +244,6 @@ fn badge_icon(ui: &mut egui::Ui, badge: OutputBadge) {
     let _ = response.on_hover_text(badge.label());
 }
 
-/// *Metronome*: a chip, or at the mini step a painted metronome.
 fn metronome_toggle(ui: &mut egui::Ui, on: bool, mini: bool) -> egui::Response {
     let colours = palette(ui.ctx());
     let text_font = font(Face::Sans, TypeRole::Secondary);
@@ -312,7 +300,6 @@ fn metronome_toggle(ui: &mut egui::Ui, on: bool, mini: bool) -> egui::Response {
     })
 }
 
-/// The limiter's gain reduction, 0 to 12 dB, in `meter_hot`.
 fn limiter_bar(ui: &mut egui::Ui, reduction_db: f32) {
     let colours = palette(ui.ctx());
     let width = ui.available_width();

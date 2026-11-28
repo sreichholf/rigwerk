@@ -99,8 +99,6 @@ fn rows_offer_dismiss_for_warnings_and_show() {
     );
 }
 
-/// Draws the list on `ctx`, clicking the centre of the node named `name`
-/// from the last frame when `at` is given.
 fn list_frame(
     ctx: &egui::Context,
     app: &mut RigWerkApp,

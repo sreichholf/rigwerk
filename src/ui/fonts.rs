@@ -1,18 +1,12 @@
-//! The bundled typefaces: subsets of IBM Plex Sans and IBM Plex Mono
-//! (`assets/fonts`, SIL OFL 1.1), embedded with `include_bytes!`.
-//!
-//! Each weight is its own named family (`sans`, `sans-medium`,
-//! `sans-semibold`, `mono`, `mono-medium`).  Proportional and Monospace
-//! start with the regular faces.  egui's default fonts stay behind every
-//! family as the fallback, and Hack comes last on the sans side: of egui's
-//! fonts it is the only one that draws ⇧, ▴ and ▾, which Plex lacks.
+//! Bundled IBM Plex subsets (`assets/fonts`, SIL OFL).  egui's fonts stay
+//! as the fallback, and Hack is last on the sans side: of those, only Hack
+//! draws ⇧, ▴ and ▾, which Plex lacks.
 
 use std::sync::Arc;
 
 use eframe::egui;
 use egui::{FontData, FontDefinitions, FontFamily};
 
-/// One bundled face, by the family name it is installed under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Face {
     Sans,
@@ -31,7 +25,6 @@ impl Face {
         Self::MonoMedium,
     ];
 
-    /// The family name: what `FontFamily::Name` carries.
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Sans => "sans",
@@ -50,7 +43,6 @@ impl Face {
         matches!(self, Self::Mono | Self::MonoMedium)
     }
 
-    /// The key of the font data in [`FontDefinitions::font_data`].
     fn data_key(self) -> &'static str {
         match self {
             Self::Sans => "plex-sans-regular",
@@ -75,7 +67,6 @@ impl Face {
 /// The key egui's default fonts use for Hack.
 const HACK: &str = "Hack";
 
-/// egui's default fonts plus the bundled faces.
 pub(crate) fn definitions() -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     let proportional = fonts
@@ -117,7 +108,6 @@ pub(crate) fn definitions() -> FontDefinitions {
     fonts
 }
 
-/// Installs [`definitions`].  The frame calls this once, with the style.
 pub(crate) fn install(ctx: &egui::Context) {
     ctx.set_fonts(definitions());
 }

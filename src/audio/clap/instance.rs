@@ -1,14 +1,11 @@
-//! The main-thread half of a loaded CLAP plugin, and its load sequence.
-//! [`ClapInstance`] lives behind the plugin's UI-only lock (`PluginHandle`):
-//! parameters, state, latency, activation, timers, fds and the editor
-//! (`gui.rs`).  It implements [`PluginHostUi`], so the shared handle reaches
-//! its parameters, state and service without naming CLAP.  The audio-thread
-//! half is `processor.rs`.
+//! Main-thread half, behind the UI-only `PluginHandle` lock.  The
+//! audio-thread half is `processor.rs`.  Audio-thread calls
+//! (`stop_processing`, an active `params.flush`) run only while no block
+//! is inside the plugin.
 //!
-//! Both halves point into one [`ClapCore`], which destroys the plugin when
-//! the last of them goes.  The instance deactivates itself on drop, which
-//! is the last handle's: processing was stopped by `LoadedPlugin`'s
-//! teardown, and the editor is closed first.
+//! Both halves share one [`ClapCore`], which `destroy`s the plugin when
+//! the last drops.  This half deactivates on drop: processing was already
+//! stopped, and the editor is closed first.
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::Path;
@@ -52,12 +49,11 @@ use super::processor::{stop_processing, ClapProcessor, ClapRange, EventBuffer, O
 use super::scan::fixed_string;
 use super::state::{StateReader, StateWriter, MAX_STATE_BYTES};
 
-/// The largest block the effect chain accepts.  Kept in step with the VST3
-/// side: plugins get set up with this size, so it must stay a block size that
-/// fixed-buffer effects can handle, and longer bridge blocks are split.
+/// The largest block the chain accepts, equal to the VST3 side.
+/// Plugins are set up at this size, so it must stay one fixed-buffer
+/// effects can handle.  Longer bridge blocks are split.
 pub(super) const MAX_BLOCK: usize = 512;
 
-/// One CLAP parameter, cached while the plugin is loaded.
 #[derive(Clone, Debug)]
 pub(super) struct ClapParam {
     pub(super) id: u32,
@@ -80,10 +76,9 @@ impl ClapParam {
     }
 }
 
-/// The plugin pointer `create_plugin` returned.  Dropping it destroys the
-/// plugin, exactly once, whether or not `init` ran or succeeded (CLAP
-/// allows `destroy` after a failed `init`).  It never deactivates: the
-/// owner of the activation does that first.
+/// `destroy` runs once on drop, even after a failed `init` (CLAP allows
+/// that).  It does not deactivate: the owner of the activation does that
+/// first.
 pub(super) struct PluginPointer(pub(super) *const clap_plugin);
 
 impl Drop for PluginPointer {
@@ -94,11 +89,8 @@ impl Drop for PluginPointer {
     }
 }
 
-/// What both halves of one plugin point into.  Fields drop in declaration
-/// order, which is the teardown order CLAP needs: destroy the instance, free
-/// the host the plugin pointed at, and only then release the shared module
-/// (which deinits the entry and unloads the library if this was its last
-/// user).
+/// Fields drop in declaration order: destroy the instance, free the host
+/// it pointed at, then release the module (deinit and unload if last).
 pub(crate) struct ClapCore {
     pub(super) _pointer: PluginPointer,
     pub(super) _host: Box<clap_host>,
@@ -113,9 +105,7 @@ pub(crate) struct ClapCore {
 unsafe impl Send for ClapCore {}
 unsafe impl Sync for ClapCore {}
 
-/// The main-thread half.
 pub(crate) struct ClapInstance {
-    /// `core._pointer`, copied for brevity.
     pub(super) plugin: *const clap_plugin,
     pub(super) params_ext: *const clap_plugin_params,
     pub(super) gui_ext: *const clap_plugin_gui,
@@ -125,7 +115,7 @@ pub(crate) struct ClapInstance {
     /// `posix-fd-support` is Linux-only.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(super) fd_ext: *const clap_plugin_posix_fd_support,
-    /// The parameters as last scanned (the panel's list).
+    /// The panel's list, as last scanned.
     pub(super) cached_params: Vec<ClapParam>,
     /// The table the processor was built with (index → id and range).  A
     /// rescan that changes it asks for a reload instead.
@@ -135,8 +125,7 @@ pub(crate) struct ClapInstance {
     pub(super) sample_rate: f64,
     pub(super) max_block: usize,
     pub(super) editor_open: bool,
-    /// The window API the editor opens with; `None` without an editor
-    /// this session can show.
+    /// `None` when this session cannot show an editor.
     pub(super) editor_api: Option<EditorApi>,
     pub(super) shared: Arc<PluginShared>,
     /// Last: the instance outlives everything above that points into it.
@@ -149,8 +138,6 @@ pub(crate) struct ClapInstance {
 // of its `PluginHandle`, one thread at a time.
 unsafe impl Send for ClapInstance {}
 
-/// What a load hands to `LoadedPlugin`: the two halves and the UI side's
-/// parts of the parameter transfers.
 pub(crate) struct ClapLoaded {
     pub(crate) instance: ClapInstance,
     pub(crate) processor: ClapProcessor,
@@ -166,8 +153,6 @@ pub(crate) struct ClapLoaded {
 }
 
 impl ClapInstance {
-    /// Opens the bundle and loads one plugin from it (see
-    /// [`Self::instantiate`]).
     pub(crate) fn load(
         path: &Path,
         plugin_id: &str,
@@ -180,11 +165,9 @@ impl ClapInstance {
         Self::instantiate(module, plugin_id, sample_rate, max_block, restore, shared)
     }
 
-    /// Creates, restores and activates one plugin from an initialised
-    /// module, and builds its processor.  Every step may fail; the guards
-    /// then tear down whatever was set up, in order, before the module is
-    /// released.  Main thread.  Processing is not started: the first audio
-    /// block does that (`start_processing` is an audio-thread call).
+    /// Main thread.  A failed step tears down what was set up before the
+    /// module is released.  Processing is not started: `start_processing`
+    /// is an audio-thread call, made by the first block.
     pub(super) fn instantiate(
         module: ModuleHandle,
         plugin_id: &str,
@@ -252,10 +235,9 @@ impl ClapInstance {
         instance.editor_api =
             choose_editor_api(instance.plugin, instance.gui_ext, &session_candidates());
 
-        // Restore the saved state and controls while the plugin is still
-        // inactive: `state.load` is a main-thread call, and so is
-        // `params.flush` until activation, so both take effect before the
-        // first audio block and the panel reads the restored values below.
+        // While still inactive: `state.load` is main-thread, and so is
+        // `params.flush` until activation, so both land before the first
+        // block.
         instance.scan_parameters();
         let state_loaded = restore
             .state
@@ -280,9 +262,9 @@ impl ClapInstance {
         let values = restore.params(state_loaded);
         let queued = instance.restore_parameters(&values, &out);
 
-        // The ports are read last before activation: the restored state may
-        // have changed them, and they cannot change while the plugin is
-        // active.  A rescan request from here on means the buffers are stale.
+        // Last, before activation: the restored state may have changed
+        // the ports, and they cannot change while the plugin is active.
+        // A rescan from here on means the buffers are stale.
         instance
             .core
             .host
@@ -297,7 +279,7 @@ impl ClapInstance {
         let outputs = PortBuffers::new(&layout.outputs, layout.main_output, block);
         instance.activate()?;
         instance.query_latency();
-        // The first value goes out with the views of the new effect.
+        // Consumed here: the views of the new effect publish it.
         shared.take_latency_change();
 
         let mut views = instance.parameters();
@@ -305,16 +287,16 @@ impl ClapInstance {
             .iter()
             .filter_map(|&(index, _)| ids.id(index))
             .collect();
-        // A value queued for the first block is what the plugin has from
-        // then on, so the panel shows it rather than the old one.
+        // A value queued for the first block is what the plugin has, so
+        // the panel shows that rather than the old one.
         for (index, value) in queued {
             if let Some(view) = views.get_mut(index) {
                 view.value = value;
                 view.display = instance.display_for(view.id, value);
             }
         }
-        // Room for a full ring, every overflow value and every value kept from
-        // a block that could not take it.
+        // Room for a full ring, every overflow, and every value a block
+        // could not take.
         let events = EventBuffer::with_capacity(from_ui.capacity() + 2 * from_ui.params());
         let processor = ClapProcessor {
             plugin,
@@ -344,12 +326,10 @@ impl ClapInstance {
         })
     }
 
-    /// The callback state the editor window follows.
     pub(crate) fn host(&self) -> Arc<HostState> {
         Arc::clone(&self.core.host)
     }
 
-    /// Hands saved state bytes to `clap_plugin_state.load`.
     pub(super) fn load_state(&mut self, bytes: &[u8]) -> bool {
         let Some(load) = (unsafe { self.state_ext.as_ref() }).and_then(|state| state.load) else {
             return false;
@@ -359,10 +339,9 @@ impl ClapInstance {
         unsafe { load(self.plugin, &stream) }
     }
 
-    /// Applies saved normalized values (`None` meaning the default) before
-    /// activation, through `params.flush` on the main thread.  A plugin
-    /// without `flush` gets them through `out` with the first block; those
-    /// are returned as `(index, normalized)` for the views.
+    /// Before activation, through `params.flush` on the main thread.
+    /// `None` is the default.  Without `flush` the values go out with
+    /// the first block and are returned for the views.
     fn restore_parameters(
         &mut self,
         values: &[(u32, Option<f64>)],
@@ -407,13 +386,12 @@ impl ClapInstance {
         Ok(())
     }
 
-    /// Whether the plugin is activated (a failed reactivation leaves it
-    /// inactive for good).
+    /// A failed reactivation leaves the plugin inactive for good.
     pub(crate) fn is_active(&self) -> bool {
         self.active
     }
 
-    /// `deactivate`, if active.  Main thread, with processing stopped.
+    /// Main thread, with processing stopped.
     pub(crate) fn deactivate(&mut self) {
         if !self.active {
             return;
@@ -424,9 +402,8 @@ impl ClapInstance {
         self.active = false;
     }
 
-    /// Reads `clap_plugin_latency.get` into [`PluginShared`].  CLAP allows
-    /// the call on the main thread while the plugin is active; an inactive
-    /// plugin (or one without the extension) reports 0.
+    /// CLAP allows this on the main thread while the plugin is active.
+    /// An inactive plugin, or one without the extension, reports 0.
     pub(super) fn query_latency(&mut self) {
         // Cleared first, so a change reported during the call is read again.
         self.core
@@ -443,10 +420,8 @@ impl ClapInstance {
         self.shared.set_latency(latency);
     }
 
-    /// Deactivates and reactivates the plugin for `request_restart`, then
-    /// reads its latency again.  Main thread, with the plugin paused (no
-    /// block inside, processing stopped).  False when the reactivation
-    /// failed: the plugin is then inactive and must not be resumed.
+    /// For `request_restart`.  Main thread, paused, no block inside.
+    /// False leaves the plugin inactive: it must not be resumed.
     pub(crate) fn restart(&mut self) -> bool {
         self.deactivate();
         // The plugin may change its latency (and call `latency.changed`)
@@ -456,23 +431,19 @@ impl ClapInstance {
         activated
     }
 
-    /// `stop_processing` for a forced pause or a teardown, as the audio
-    /// thread: the caller knows no block is inside the plugin.
+    /// As the audio thread.  The caller knows no block is inside.
     pub(crate) fn stop_processing(&mut self) {
         stop_processing(self.plugin);
     }
 
-    /// Whether the plugin has `params.flush`.
     pub(crate) fn can_flush(&self) -> bool {
         unsafe { self.params_ext.as_ref() }.is_some_and(|params| params.flush.is_some())
     }
 
-    /// Hands `(id, native)` values to `params.flush` and returns the output
-    /// values it reported, `(index, normalized)`.  CLAP makes `flush` a
-    /// main-thread call while inactive and an audio-thread one while
-    /// active, never concurrent with `process`: so an active plugin must be
-    /// paused with no block inside, and the call is made as its audio
-    /// thread.
+    /// Returns reported output values, `(index, normalized)`.  `flush` is
+    /// main-thread while inactive and audio-thread while active, never
+    /// concurrent with `process`: an active plugin is paused with no
+    /// block inside, and the call runs as its audio thread.
     pub(crate) fn flush_values(&mut self, values: &[(u32, f64)]) -> Vec<(usize, f64)> {
         let Some(flush) = (unsafe { self.params_ext.as_ref() }).and_then(|params| params.flush)
         else {
@@ -497,9 +468,8 @@ impl ClapInstance {
         reported
     }
 
-    /// The plugin's main-thread callbacks: `on_main_thread` when asked
-    /// for, due timers and ready file descriptors.  CLAP allows these while
-    /// the audio thread processes.
+    /// `on_main_thread`, due timers, and ready fds.  CLAP allows these
+    /// while the audio thread processes.
     pub(crate) fn service_callbacks(&mut self) {
         let host = Arc::clone(&self.core.host);
         if host.callback_requested.swap(false, Ordering::Relaxed) {
@@ -520,12 +490,10 @@ impl ClapInstance {
         }
     }
 
-    /// Rescans the parameters if the plugin asked to.  Returns the new
-    /// views, or `None` without a request.  A rescan that changes the ids
-    /// or ranges the processor was built with cannot be followed: the
-    /// processor, the views and every value sent use that one table.  The
-    /// old list is kept and a reload is asked for: the effect stops
-    /// processing and the path rebuilds it with the new controls.
+    /// `None` without a request.  A rescan that changes the ids or ranges
+    /// the processor was built with cannot be followed: that table is
+    /// what the processor, the views, and every value use.  The old list
+    /// stays and a reload is asked for.
     pub(crate) fn rescan_if_requested(&mut self) -> Option<Vec<PluginParamView>> {
         if !self.core.host.params_rescan.swap(false, Ordering::Relaxed) {
             return None;
@@ -546,13 +514,12 @@ impl ClapInstance {
         Some(self.parameters())
     }
 
-    /// Whether the plugin asked for `params.flush` (`request_flush`) and no
-    /// block delivered it yet.
+    /// `request_flush`, and no block has delivered it yet.
     pub(crate) fn flush_requested(&self) -> bool {
         self.core.host.flush_requested.load(Ordering::Relaxed)
     }
 
-    /// Takes the flush request, for a flush the UI makes.
+    /// For a flush the UI makes.
     pub(crate) fn take_flush_request(&self) -> bool {
         self.core
             .host
@@ -560,17 +527,16 @@ impl ClapInstance {
             .swap(false, Ordering::Relaxed)
     }
 
-    /// Whether the latency changed outside a restart (which CLAP does not
-    /// allow while active, but some plugins do anyway): re-read it.
+    /// CLAP does not allow a latency change while active, but some
+    /// plugins do it anyway: re-read it.
     pub(crate) fn reread_latency_if_changed(&mut self) {
         if self.core.host.latency_changed.load(Ordering::Acquire) {
             self.query_latency();
         }
     }
 
-    /// Saves the plugin's state through `clap_plugin_state.save`, a
-    /// main-thread call CLAP allows while the audio thread processes.  Off
-    /// the main thread the save is deferred.
+    /// Main thread; CLAP allows it while the audio thread processes.
+    /// Off the main thread the save is deferred.
     pub(crate) fn save_state(&mut self) -> StateSave {
         if !self.core.host.on_main_thread() {
             return StateSave::Deferred;
@@ -661,7 +627,6 @@ impl ClapInstance {
         }
     }
 
-    /// Reads every control from the plugin (`params.get_value`).
     pub(crate) fn parameters(&self) -> Vec<PluginParamView> {
         let Some(params) = (unsafe { self.params_ext.as_ref() }) else {
             return Vec::new();
@@ -691,7 +656,6 @@ impl ClapInstance {
             .collect()
     }
 
-    /// The plugin's text for a normalized value of `id`.
     pub(crate) fn display_for(&self, id: u32, value: f64) -> String {
         let Some(param) = self.cached_params.iter().find(|param| param.id == id) else {
             return String::new();
@@ -699,7 +663,6 @@ impl ClapInstance {
         self.value_text(id, param.range().denormalise(value))
     }
 
-    /// The views every control has at its default.
     pub(crate) fn default_views(&self) -> Vec<PluginParamView> {
         self.cached_params
             .iter()
@@ -719,8 +682,6 @@ impl ClapInstance {
             .collect()
     }
 
-    /// The writable controls' defaults, `(index, normalized)` in the
-    /// processor's table.
     pub(crate) fn default_values(&self) -> Vec<(usize, f64)> {
         self.cached_params
             .iter()
@@ -732,26 +693,21 @@ impl ClapInstance {
             .collect()
     }
 
-    /// Whether `id` is a control the plugin does not let the host set.
     pub(crate) fn is_read_only(&self, id: u32) -> bool {
         self.cached_params
             .iter()
             .any(|param| param.id == id && param.read_only)
     }
 
-    /// The native value of a normalized one at `index` of the table.
     pub(crate) fn native(&self, index: usize, value: f64) -> Option<(u32, f64)> {
         let range = self.ranges.get(index)?;
         Some((range.id, range.denormalise(value)))
     }
 
-    /// Sends normalized `(index, value)` values to the plugin.  While it is
-    /// processing they go through the transfer into the next block's input
-    /// events.  While it is not (no block yet, or paused) and nothing older
-    /// is queued, the UI pauses it and hands them to `params.flush` itself,
-    /// so a value set with no audio running reaches the plugin and its state
-    /// at once.  Never waits for the audio thread: a pause that is not ready
-    /// at once leaves the values queued and is finished by
+    /// While processing, values go through the transfer into the next
+    /// block.  While idle, and nothing older is queued, the UI flushes
+    /// them itself so a value with no audio reaches the plugin at once.
+    /// Never waits: a pause that is not ready leaves them queued for
     /// [`PluginHostUi::service`].
     fn send_values(&mut self, io: &mut HostIo<'_>, values: &[(usize, f64)]) {
         let shared = io.shared;

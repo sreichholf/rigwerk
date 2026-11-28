@@ -1,18 +1,10 @@
-//! The built-in 5-band guitar EQ on the master mix.  There are two: one
-//! before the plugin effects and one after them.
-//!
-//! Two shelves and three bells, each a biquad filter from the Audio EQ
-//! Cookbook (R. Bristow-Johnson).  Every sample is filtered as it passes, so
-//! the EQ adds no latency.
+//! RBJ Audio EQ Cookbook biquads.  Per sample, so the EQ adds no latency.
 
 use std::f32::consts::PI;
 
-/// Where an EQ sits in the master chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EqSlot {
-    /// Before the plugin effects: shapes what the plugins receive.
     Pre = 0,
-    /// After the plugin effects: shapes what the plugins produce.
     Post = 1,
 }
 
@@ -24,7 +16,6 @@ impl EqSlot {
     }
 }
 
-/// The two filter shapes the EQ uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BandKind {
     LowShelf,
@@ -33,23 +24,22 @@ pub enum BandKind {
 }
 
 pub const MAX_GAIN_DB: f32 = 12.0;
-/// Width of every band as Q: low is wide, high is narrow.
+/// Q: low is wide, high is narrow.
 pub const MIN_Q: f32 = 0.3;
 pub const MAX_Q: f32 = 6.0;
 const DEFAULT_Q: f32 = 1.0;
-/// A shelf at this Q has the gentlest slope, with no resonant bump.
+/// Butterworth shelf: gentlest slope, no resonant bump.
 const SHELF_Q: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
-/// What one band is for, where it starts and how far it can move.
 pub struct BandSpec {
     pub name: &'static str,
     pub kind: BandKind,
     pub default_hz: f32,
     pub min_hz: f32,
     pub max_hz: f32,
-    /// The width this band returns to on FLAT and double-click.
+    /// Restored by FLAT and double-click.
     pub default_q: f32,
-    /// What the band does on guitar, for the hover text.
+    /// Guitar role, shown as hover text.
     pub role: &'static str,
 }
 
@@ -101,17 +91,15 @@ pub const BANDS: [BandSpec; 5] = [
     },
 ];
 
-/// One band's settings.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EqBand {
     pub on: bool,
     pub hz: f32,
     pub gain_db: f32,
-    /// Width (Q).  On the shelves it sets how steeply the shelf rolls in.
+    /// Shelf slope as well as bell width.
     pub q: f32,
 }
 
-/// The whole EQ: a master switch and five bands.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct EqSettings {
@@ -120,8 +108,6 @@ pub struct EqSettings {
 }
 
 impl Default for EqSettings {
-    /// Flat: every band at 0 dB, so switching the EQ on changes nothing
-    /// until a band is moved.
     fn default() -> Self {
         Self {
             enabled: true,
@@ -136,7 +122,7 @@ impl Default for EqSettings {
 }
 
 impl EqSettings {
-    /// Back to flat, keeping the master switch as it is.
+    /// Keeps `enabled`.
     pub fn flat(self) -> Self {
         Self {
             enabled: self.enabled,
@@ -144,7 +130,6 @@ impl EqSettings {
         }
     }
 
-    /// Keeps saved values inside the ranges the controls offer.
     pub fn sanitized(mut self) -> Self {
         for (band, spec) in self.bands.iter_mut().zip(BANDS.iter()) {
             band.hz = finite_or(band.hz, spec.default_hz).clamp(spec.min_hz, spec.max_hz);
@@ -154,7 +139,6 @@ impl EqSettings {
         self
     }
 
-    /// True when the EQ would change the sound at all.
     pub fn is_active(&self) -> bool {
         self.enabled
             && self
@@ -163,7 +147,6 @@ impl EqSettings {
                 .any(|band| band.on && band.gain_db.abs() > 0.01)
     }
 
-    /// The combined response in dB at `hz`, for drawing the curve.
     pub fn response_db(&self, hz: f32, sample_rate: u32) -> f32 {
         if !self.enabled {
             return 0.0;
@@ -173,9 +156,6 @@ impl EqSettings {
             .sum()
     }
 
-    /// One band's own contribution in dB at `hz`.  The UI draws these faint
-    /// lines behind the combined curve, so moving gain, frequency or Q shows
-    /// exactly which band changes what.
     pub fn band_response_db(&self, index: usize, hz: f32, sample_rate: u32) -> f32 {
         let Some(band) = self.bands.get(index) else {
             return 0.0;
@@ -195,7 +175,7 @@ fn finite_or(value: f32, fallback: f32) -> f32 {
     }
 }
 
-/// Normalised biquad coefficients (a0 = 1).
+/// Coefficients with `a0` divided out.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Biquad {
     b0: f32,
@@ -224,9 +204,8 @@ impl Biquad {
         let a = 10f32.powf(band.gain_db / 40.0);
         let w0 = 2.0 * PI * hz / rate;
         let (sin, cos) = w0.sin_cos();
-        // The shelves take the same width control as the bells: at Q 0.7 they
-        // keep the gentle Butterworth slope, lower is softer and higher is
-        // steeper with a little bump at the corner.
+        // Shelves share the bell Q.  ~0.7 stays Butterworth; lower is softer
+        // and higher bumps the corner.
         let q = band.q.clamp(MIN_Q, MAX_Q);
         let alpha = sin / (2.0 * q);
         let (b0, b1, b2, a0, a1, a2) = match kind {
@@ -270,7 +249,6 @@ impl Biquad {
         }
     }
 
-    /// |H(e^jw)| in dB.
     fn response_db(&self, hz: f32, sample_rate: u32) -> f32 {
         let w = 2.0 * PI * hz / sample_rate.max(1) as f32;
         let (s1, c1) = w.sin_cos();
@@ -284,7 +262,7 @@ impl Biquad {
     }
 }
 
-/// Filter memory for one channel of one band (transposed direct form II).
+/// Transposed direct form II state.
 #[derive(Clone, Copy, Default)]
 struct State {
     z1: f32,
@@ -301,7 +279,6 @@ impl State {
     }
 }
 
-/// The running EQ for one output: coefficients plus stereo filter memory.
 pub(crate) struct Equalizer {
     settings: EqSettings,
     sample_rate: u32,
@@ -325,8 +302,7 @@ impl Equalizer {
         eq
     }
 
-    /// Takes new settings or a new rate.  Filter memory is kept, so moving a
-    /// control while playing does not click.
+    /// Keeps filter memory, so a live tweak does not click.
     pub(crate) fn update(&mut self, settings: EqSettings, sample_rate: u32) {
         if settings == self.settings
             && sample_rate == self.sample_rate

@@ -69,9 +69,8 @@ fn vst3_fixture_each_bundle_loads_and_lists_its_audio_class() {
     }
 }
 
-/// The scan finds each bundle without loading it, and the audio classes
-/// `moduleinfo.json` declares are the ones the factory reports, so a
-/// scanned class id opens the class it names.
+/// The scan does not load the binary.  A class id from `moduleinfo.json`
+/// opens the class the factory reports.
 #[test]
 fn vst3_fixture_the_scan_lists_what_the_factory_offers() {
     let _main = crate::audio::claim_main_thread();

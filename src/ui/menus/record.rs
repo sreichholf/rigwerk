@@ -1,5 +1,3 @@
-//! The record control and its menu.
-
 use eframe::egui;
 use egui::{CornerRadius, RichText, Stroke};
 
@@ -9,7 +7,6 @@ use crate::audio::{EngineState, RecordPhase, RecordSource};
 use crate::ui::theme::{font, palette, Face, TypeRole};
 
 impl RigWerkApp {
-    /// *Rec*, the elapsed time, and the menu of what the take contains.
     pub(crate) fn record_control(&mut self, ui: &mut egui::Ui) {
         let colours = palette(ui.ctx());
         let status = self.engine_recording_status();

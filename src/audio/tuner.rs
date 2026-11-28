@@ -1,18 +1,12 @@
-//! The tuner's non-UI half: note maths, the tuning table, YIN pitch
-//! detection and the tuning-guided harmonic analysis that turns one strum into
-//! per-string readings.
+//! YIN, then a harmonic fit that turns one strum into per-string
+//! readings.  Nothing here knows about egui.
 //!
-//! Nothing here knows about egui.  `app::tuner::TunerState` owns a
-//! [`TunerAnalysis`], copies the latest tap window into a scratch buffer and
-//! reads the resulting [`TunerFrame`].  The fixed scratch is allocated in
-//! `new`; the poly and preview buffers are sized on the first window of each
-//! size and reused after that, so a steady-state analysis does not allocate.
+//! Scratch is allocated in `new` and reused, so a steady analysis does
+//! not allocate.
 //!
-//! Input rates up to 192 kHz are supported.  The decimation factor is clamped
-//! at 8, so at 192 kHz one decimated sample is still 41.7 µs and YIN's window
-//! reaches A0 (tau 873 of an available 890).  Above that A0 falls out of
-//! reach — at 384 kHz the lowest measurable note is about 47 Hz — so the
-//! tuner does not claim the bottom octave of a bass there.
+//! Decimation stops at 8.  At 192 kHz that still reaches A0.  Above
+//! that the bottom octave of a bass is out of reach, and the tuner
+//! does not claim it.
 
 use std::f32::consts::TAU;
 use std::sync::Arc;
@@ -80,12 +74,10 @@ const DEFAULT_RATE: u32 = 48_000;
 /// so a 7- and 8-string chord still shows a spread.
 const PREVIEW_DETUNES: [f32; 6] = [-12.4, 2.1, -0.8, 6.2, -3.4, 1.2];
 
-/// Equal-tempered frequency of a MIDI note, with A4 as the reference.
 pub(crate) fn midi_to_hz(midi: i16, a4: f32) -> f32 {
     a4 * 2.0f32.powf((midi as f32 - 69.0) / 12.0)
 }
 
-/// Signed distance of `frequency` from `target`, in cents.
 pub(crate) fn hz_to_cents(frequency: f32, target: f32) -> f32 {
     if frequency <= 0.0 || target <= 0.0 {
         return 0.0;
@@ -547,11 +539,9 @@ pub(crate) struct TunerFrame {
     pub strings: Vec<StringReading>,
 }
 
-/// The tolerance band with hysteresis: a reading inside the band latches
-/// InTune after `STABLE_FRAMES`, and only a reading past `tolerance + 1`
-/// leaves.  Centered is reported from inside that latch when the reading is
-/// also within the permanent ±1 mark, so it needs both the stable count and
-/// the narrow band.
+/// Inside the band latches InTune after `STABLE_FRAMES`, and only a
+/// reading past `tolerance + 1` leaves.  Centered also needs the
+/// permanent ±1 mark.
 #[derive(Clone, Copy)]
 struct StateLatch {
     in_tune: bool,
@@ -628,11 +618,9 @@ fn select_sample(interleaved: &[f32], frame: usize, channel: TunerChannel) -> f3
     }
 }
 
-/// Two cascaded one-pole low-passes ahead of the 3:1–8:1 decimation that keeps
-/// YIN's difference function cheap; factor 1 skips the filter.  The corner
-/// sits at 0.42 of the decimated rate, so the highest note the tuner shows
-/// still passes while content that would alias folds away below the analysis
-/// band.
+/// Two one-poles ahead of the decimation.  Factor 1 skips them.  The
+/// corner is 0.42 of the decimated rate, so the highest shown note
+/// passes and what would alias is below the analysis band.
 struct Decimator {
     factor: usize,
     rate: u32,
@@ -747,14 +735,10 @@ fn interleave_into(mono: &[f32], interleaved: &mut [f32]) {
     }
 }
 
-/// Window the poly stage transforms.  Guitar presets use 0.17 s; a preset
-/// whose lowest string is under 60 Hz gets 0.34 s, because at 41 Hz one
-/// 0.17 s bin is over 200 cents and a neighbour's partial inside that lobe
-/// pulls the row several cents.  Both fit inside [`TAP_COPY_FRAMES`], which is
-/// also the cap: at 96 kHz 16384 frames is 170 ms, so a bass preset gets the
-/// same window a guitar gets at 48 kHz; at 192 kHz that cap is only 85 ms (one
-/// cell 11.7 Hz), so poly rows at that rate are coarse — the YIN reading stays
-/// exact, the all-strings view does not.  Above 192 kHz neither is promised.
+/// 0.17 s, or 0.34 s when the lowest string is under 60 Hz: at 41 Hz
+/// one 0.17 s bin is over 200 cents and a neighbour's partial pulls
+/// the row.  [`TAP_COPY_FRAMES`] caps it, so at 192 kHz the poly rows
+/// are coarse.  The YIN reading is not.  Above 192 kHz neither is.
 fn poly_window_len(rate: u32, lowest_hz: f32) -> usize {
     let seconds = if lowest_hz < LOW_POLY_HZ { 0.34 } else { 0.17 };
     ((rate as f32 * seconds) as usize)
@@ -1074,20 +1058,12 @@ impl TunerAnalysis {
         level_db
     }
 
-    /// Matches the measured frequency to a string and folds harmonics onto
-    /// it, or falls back to the nearest chromatic note.
-    ///
-    /// Selection is: smallest distance to a string target first, then — among
-    /// candidates within [`MATCH_TIE_CENTS`] of that best — the smallest
-    /// divisor, i.e. the reading that needs no harmonic folding.  An exact
-    /// octave is both a played string and its neighbour's harmonic; the string
-    /// itself is what was plucked.  A twelfth above the lowest string is *not*
-    /// an exact integer multiple in equal temperament (B3 sits 1.96 cents flat
-    /// of 3×E2), so it still folds to the lower string.
-    ///
-    /// A deliberately pure twelfth is therefore indistinguishable from the
-    /// lower string's third harmonic; separating them would need a
-    /// target-string lock, which this pitch-only layer does not keep.
+    /// Closest string target, then the smallest divisor within
+    /// [`MATCH_TIE_CENTS`]: an exact octave is the played string, not
+    /// its neighbour's harmonic.  A pure twelfth is 1.96 cents flat of
+    /// 3×E2 in equal temperament, so it still folds down.  This layer
+    /// keeps no target-string lock, so a pure twelfth and that harmonic
+    /// are the same reading.
     fn match_note(
         &self,
         frequency: f32,
@@ -1138,11 +1114,9 @@ impl TunerAnalysis {
             }
         }
 
-        // Chromatic.  There is deliberately no octave folding here: YIN's
-        // first-dip rule already refuses the half-period dip for a periodic
-        // signal, and folding on a single clarity estimate would report an
-        // octave down for every clean low note.  The preset matcher is where
-        // the extra evidence (the string targets) exists.
+        // No octave folding.  YIN's first dip already refuses the
+        // half-period, and folding on clarity alone would report every
+        // clean low note an octave down.
         let midi = nearest_midi(frequency, reference_hz);
         let target_hz = midi_to_hz(midi, reference_hz);
         (midi, target_hz, hz_to_cents(frequency, target_hz), None)
@@ -1301,12 +1275,8 @@ impl TunerAnalysis {
         total / HARMONICS as f32
     }
 
-    /// The median level halfway between the partials: a null with no string in
-    /// it.  The median, not the mean, because in a chord several midpoints are
-    /// exactly another string's partial (C2's 1.5× is G2's fundamental, F3's
-    /// midpoints are C3's harmonics); the median ignores the occupied points
-    /// while a noise floor fills all six and reads about the same on both
-    /// sides.
+    /// Median, not mean: in a chord several midpoints are another
+    /// string's partial.  A noise floor fills all of them.
     fn inter_harmonic_level(&self, target: f32) -> f32 {
         let mut levels = [0.0f32; HARMONICS];
         for harmonic in 1..=HARMONICS {
@@ -1400,13 +1370,11 @@ impl TunerAnalysis {
         // partial is not this string's alone.  The test is in hertz because a
         // cell is a fixed number of hertz, not a fixed number of cents.
         let cell_hz = rate as f32 / window as f32;
-        // Two weight tables.  `presence` feeds the "is this string ringing"
-        // test with a 1/sqrt(k) shape, so the fundamental always carries full
-        // weight (in an octave pair it is exactly what the player plucked).
-        // `pitch` feeds the cents estimate and keeps only the partials that
-        // belong to this string alone, weighted by k: partial k is k times
-        // finer in cents per bin, which is what makes a low string measurable
-        // at all — at A0 on a 96 kHz window one bin spans some 340 cents.
+        // `presence` is 1/sqrt(k), fundamental always full: in an octave
+        // pair that is what was plucked.  `pitch` keeps only this
+        // string's partials, weighted by k, because partial k is k times
+        // finer in cents per bin.  At A0 on a 96 kHz window one bin is
+        // about 340 cents.
         let mut presence = [[0.0f32; HARMONICS]; MAX_STRINGS];
         let mut pitch = [[0.0f32; HARMONICS]; MAX_STRINGS];
         for (index, (_, midi)) in tuning.strings.iter().enumerate() {
@@ -1461,15 +1429,10 @@ impl TunerAnalysis {
         for (index, (_, midi)) in tuning.strings.iter().enumerate() {
             let target = midi_to_hz(*midi, reference_hz);
 
-            // The pitch fit keeps only this string's own partials, which is
-            // what places the detune precisely.  It has two failure modes at
-            // the bottom of a long-scale preset: its argmax can run off the
-            // end of the sweep, and a string with no clean partial energy has
-            // nothing to fit at all.  In both cases the presence fit — which
-            // always keeps h1 — is used instead.  Only when the presence fit
-            // is edge-pinned as well does the row stay silent; the level,
-            // null, loudest-share and fundamental-share gates decide
-            // independently.
+            // At the bottom of a long-scale preset the pitch fit's argmax
+            // can leave the sweep, or the string has no clean partial.
+            // The presence fit, which always keeps h1, is used then.
+            // The row stays silent only when that fit is edge-pinned too.
             let mut cents = self.fit_cents(target, &pitch[index]);
             let mut score = self.string_score(target, cents, &presence[index]);
             let mut clean = self.string_score(target, cents, &pitch[index]);
@@ -1573,11 +1536,9 @@ impl TunerAnalysis {
         }
         for slot in 1..order_len {
             let weaker = order[slot];
-            // A ghost carries its alleged pitch only through the stronger
-            // string's harmonic series; a real string also has energy on the
-            // partials that belong to it alone.  Without that check a played
-            // high E in an 8-string reads as a ghost of the low E, because
-            // its fundamental is the low string's fourth harmonic.
+            // A real string has energy on partials that are its own.
+            // Without that, a played high E reads as a ghost of the low
+            // E: its fundamental is the low string's fourth harmonic.
             if clean_scores[weaker] >= GHOST_CLEAN_RATIO * best_scores[weaker] {
                 continue;
             }

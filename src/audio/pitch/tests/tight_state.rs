@@ -1,6 +1,3 @@
-//! Tight's state driven sample by sample: where its heads read, what the
-//! period estimate holds and how a splice sums.
-
 use std::f64::consts::TAU;
 
 use super::super::tight::{rate_scale, spec, TightState, BUFFER_LEN};

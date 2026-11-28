@@ -1,8 +1,5 @@
-//! The session menu: the saved list, save, rename and delete.
-//!
-//! A row shows the name, the devices, the rate, the buffer and an estimated
-//! latency.  The live figure is only the open session while it is not edited.
-//! From 8 saved sessions the list filters by name, and past 12 rows it scrolls.
+//! The session menu.  The live latency figure is only the open session
+//! while it is not edited.
 
 use eframe::egui;
 use egui::{Align2, CornerRadius, FontId, Rect, RichText, Sense, Stroke, Vec2};
@@ -16,9 +13,7 @@ use crate::ui::widgets::{fit_text, palette_focus, row_info, OutlineButton, TextF
 /// Allocated height of one row, including the gap under it.
 pub(crate) const SESSION_ROW_H: f32 = 72.0;
 const ROW_GAP: f32 = 4.0;
-/// The list gains a filter at this many saved sessions.
 pub(crate) const SESSION_FILTER_FROM: usize = 8;
-/// The list scrolls once it has more rows than this.
 pub(crate) const SESSION_SCROLL_AFTER: usize = 12;
 
 const LOAD_WARNING: &str = "Load and lose changes";
@@ -27,24 +22,21 @@ const BUFFERS_HOVER: &str = "Buffers only. Open the session to include the chain
 const DELETE_LABEL: &str = "Delete";
 const DELETE_CONFIRM: &str = "Delete session";
 
-/// `true` when the saved list is long enough for a name filter.
 pub(crate) fn session_list_shows_filter(saved: usize) -> bool {
     saved >= SESSION_FILTER_FROM
 }
 
-/// Viewport height for more than [`SESSION_SCROLL_AFTER`] rows.  Fewer rows
-/// are not placed in a scroll area.
+/// Fewer rows are not placed in a scroll area.
 pub(crate) fn session_list_scroll_height(rows: usize) -> Option<f32> {
     (rows > SESSION_SCROLL_AFTER).then_some(SESSION_ROW_H * SESSION_SCROLL_AFTER as f32)
 }
 
-/// Case-insensitive match on the session name.  A blank filter matches all.
+/// A blank filter matches all.
 pub(crate) fn session_matches_filter(name: &str, filter: &str) -> bool {
     let filter = filter.trim();
     filter.is_empty() || name.to_lowercase().contains(&filter.to_lowercase())
 }
 
-/// The input and output names.  Empty names are left out.
 pub(crate) fn session_devices(input: &str, output: &str) -> String {
     match (input.is_empty(), output.is_empty()) {
         (false, false) => format!("{input} → {output}"),
@@ -54,7 +46,6 @@ pub(crate) fn session_devices(input: &str, output: &str) -> String {
     }
 }
 
-/// `48 kHz`, or `48 → 44.1 kHz` when the output rate is set and differs.
 pub(crate) fn session_rate_text(rate: u32, output_rate: u32) -> String {
     if output_rate != 0 && output_rate != rate {
         let full = rate_label(rate);
@@ -65,7 +56,6 @@ pub(crate) fn session_rate_text(rate: u32, output_rate: u32) -> String {
     }
 }
 
-/// `64 smp`, or `64 / 128 smp` when the output buffer is set and differs.
 pub(crate) fn session_buffer_text(buffer: usize, output_buffer: usize) -> String {
     if output_buffer == 0 || output_buffer == buffer {
         format!("{buffer} smp")
@@ -74,12 +64,10 @@ pub(crate) fn session_buffer_text(buffer: usize, output_buffer: usize) -> String
     }
 }
 
-/// `≈ 7.6 ms` below 10 ms, `≈ 13 ms` from 10 ms.
 pub(crate) fn session_latency_text(ms: f32) -> String {
     format!("≈ {}", format_ms(ms))
 }
 
-/// Rate, buffer and latency, in the status-bar shape.
 pub(crate) fn session_facts(
     rate: u32,
     output_rate: u32,
@@ -95,9 +83,8 @@ pub(crate) fn session_facts(
     )
 }
 
-/// Input buffer time plus output buffer time.  `bridge_buffer_ms` is added
-/// only when both rates are non-zero and differ.  A zero output rate or
-/// buffer follows the input.
+/// `bridge_buffer_ms` is added only when both rates are non-zero and differ.
+/// A zero output rate or buffer follows the input.
 pub(crate) fn buffers_only_ms(
     rate: u32,
     buffer: usize,
@@ -126,7 +113,6 @@ pub(crate) fn buffers_only_ms(
     input_ms + output_ms + bridge
 }
 
-/// Device line, with the load warning on the next line while it is showing.
 pub(crate) fn session_detail(devices: &str, load_warning: bool) -> String {
     if load_warning {
         format!("{devices}\n{LOAD_WARNING}")
@@ -135,10 +121,7 @@ pub(crate) fn session_detail(devices: &str, load_warning: bool) -> String {
     }
 }
 
-/// One saved session.
-///
-/// `detail` is the device line.  A second line, after a newline, is
-/// "Load and lose changes" while that load still needs a confirm.
+/// A second line is "Load and lose changes" while that load needs a confirm.
 /// `live_estimate` selects the clock-output hover; otherwise the hover says
 /// the figure is buffers only.
 pub(crate) fn session_row(
@@ -344,7 +327,6 @@ pub(crate) enum SessionAction {
 }
 
 impl RigWerkApp {
-    /// The session name.  The menu lists saved sessions and the edits.
     pub(crate) fn session_button(&mut self, ui: &mut egui::Ui) {
         let colours = crate::ui::theme::palette(ui.ctx());
         let name = if self.session_name.trim().is_empty() {
@@ -534,7 +516,6 @@ impl RigWerkApp {
                 }
             });
         };
-        // More than 12 rows scroll.  Fewer stay at their own height.
         if let Some(height) = session_list_scroll_height(shown.len()) {
             egui::ScrollArea::vertical()
                 .id_salt("saved-sessions")

@@ -94,8 +94,7 @@ fn steady_mixer(signal: (f32, f32)) -> (OutputMixer, Shared) {
 }
 
 fn render(mixer: &mut OutputMixer, shared: &Shared, frames: usize) -> Vec<[f32; 4]> {
-    // The callback must not allocate: the scratch is sized here, as the
-    // backends do before the first block.
+    // Sized here: the callback must not allocate.
     mixer.prepare(frames);
     let mut out = vec![[0.0f32; 4]; frames];
     mixer.render_taps(shared, frames, |index, frame| out[index] = frame);
@@ -119,10 +118,8 @@ fn a_block_at_the_prepared_size_does_not_grow_the_scratch() {
     );
 }
 
-/// The release fallback: a block past the prepared size still renders, so the
-/// scratch grows for it instead of dropping samples.  `begin_block` only
-/// asserts it in a debug build (the test below), so this exercises the growth
-/// itself in every profile.
+/// Release grows the scratch and still renders.  Debug asserts, so this
+/// runs in every profile.
 #[test]
 fn a_block_larger_than_prepared_grows_the_scratch() {
     let mut path = PathProcessor::new(48_000, 0);
@@ -333,8 +330,7 @@ fn a_ten_channel_device_fills_every_channel_through_write_frame() {
     mixer.publish_device_channels(&shared);
     assert_eq!(shared.clock_output.channels(), 10);
     let frames = 64;
-    // The scratch is sized before the callback, as the backends do; nothing
-    // in the block may allocate.
+    // Sized here: the callback must not allocate.
     mixer.prepare(frames);
     let mut data = vec![f32::NAN; frames * 10];
     mixer.render(&shared, frames, |index, mapped| {
@@ -621,7 +617,6 @@ fn largest_step(out: &[[f32; 4]]) -> f32 {
         .fold(0.0, f32::max)
 }
 
-/// Renders `blocks` blocks of 256 frames into one run.
 fn render_blocks(mixer: &mut OutputMixer, shared: &Shared, blocks: usize) -> Vec<[f32; 4]> {
     (0..blocks)
         .flat_map(|_| render(mixer, shared, 256))
@@ -706,7 +701,6 @@ fn a_short_priming_fades_in_from_silence() {
     shared.set_eq(EqSlot::Pre, bypassed);
     shared.set_eq(EqSlot::Post, bypassed);
     let mut mixer = OutputMixer::new(48_000, 2);
-    // Block 1: nothing has arrived yet.
     let empty = render(&mut mixer, &shared, 64);
     assert!(empty.iter().all(|frame| frame[0] == 0.0));
     // Block 2: the bridge buffer is full and playback fades in from about 0.
@@ -925,10 +919,8 @@ fn golden_direct_render(hash: &mut Fnv) {
     }
 }
 
-/// Output recorded before the chain moved into per-path processors: one
-/// path must stay bit-identical.  The EQ, gate and resampler designs
-/// use the platform's libm, so the recorded hashes are only checked on
-/// the platform they were recorded on.
+/// One path matches the recorded hash.  The EQ, gate and resampler use
+/// libm, so the hash is checked only where it was recorded.
 #[test]
 fn one_path_is_bit_identical_to_the_recorded_output() {
     let mut ring = Fnv::new();
@@ -1302,15 +1294,13 @@ fn the_mixer_publishes_the_total_dsp_time_of_its_paths() {
     );
 }
 
-/// `frames` frames of the clock output, as one block.
 fn device_frames(
     mixer: &mut OutputMixer,
     shared: &Shared,
     channels: usize,
     frames: usize,
 ) -> Vec<Vec<f32>> {
-    // The callback must not allocate: the scratch is sized here, as the
-    // backends do before the first block.
+    // Sized here: the callback must not allocate.
     mixer.prepare(frames);
     let mut out = vec![vec![0.0f32; channels]; frames];
     mixer.render(shared, frames, |index, mapped| {
@@ -1350,11 +1340,8 @@ fn two_paths_add_up_where_their_maps_meet() {
         },
     )]));
     let out = device_frames(&mut mixer, &shared, 4, 32);
-    // Out 1 sums both L; Out 2 is path 0's R; Out 3 is reached by no
-    // path, so it gets the mono copy of both paths mapped here; Out 4 is
-    // path 1's R.
-    // Out 1 is both lefts (1.0), over the safety ceiling, so the frame is
-    // held there and the other channels scale with it.
+    // Out 3 is reached by no path, so it gets the mono copy.  Out 1 is
+    // over the ceiling, so the frame is held and the other channels scale.
     let ceiling = crate::audio::safety_ceiling_linear();
     assert_eq!(
         out[31],
@@ -1514,10 +1501,8 @@ fn a_removed_path_fades_out_and_then_goes_inactive() {
     assert_eq!(shared.paths[added].state(), PathState::Inactive);
 }
 
-/// A removed path whose mixer still holds the chain runtime when the UI
-/// releases it: the release waits, the mixer parks the runtime with its
-/// next block, and the next service frame applies the release and
-/// destroys the slot on the UI thread.
+/// The release waits until the mixer parks the runtime.  The next
+/// service frame destroys the slot on the UI thread.
 #[test]
 fn a_removed_path_releases_its_plugins_once_the_mixer_lets_go() {
     use super::super::path::PathState;
@@ -2369,10 +2354,8 @@ fn a_measurement_fades_a_sounding_tick_instead_of_cutting_it() {
     );
 }
 
-/// A stereo extra output with the music on channel 0 only, the tick on
-/// channel 1, and path 0 trimmed by −5 ms (240 frames at 48 kHz): a dry
-/// path would wait 240 frames there, so the tick waits in that extra output's
-/// click line.
+/// Path 0 is trimmed −5 ms, so a dry path waits 240 frames and the
+/// tick waits in that extra output's click line.
 fn trimmed_tick_extra_output(channel_bit: u8) -> OutputDeviceSettings {
     let mut extra_output = OutputDeviceSettings {
         path_map: PathMapSettings::first(ChannelMap {

@@ -1,19 +1,17 @@
-//! Per-sample control ramps and dropout fade helpers for the output mixer.
+//! A control change keeps its slope across blocks.  A step smaller than
+//! one ulp snaps.
 
 use super::route_frame;
 
-/// How long a dropout takes to fade the held frame to silence, and how long
-/// playback takes to fade back in once the bridge buffer has refilled.  Long enough
-/// that neither edge clicks, short enough not to smear the note around it.
+/// Long enough that a dropout edge does not click, short enough not to
+/// smear the note.
 pub(crate) const DROPOUT_FADE_SECONDS: f32 = 0.0025;
 
-/// A control change is ramped over this long, whatever block size the host
-/// hands over: long enough to hide the step, short enough to feel immediate.
+/// Long enough to hide a control step, short enough to feel immediate.
 pub(crate) const CONTROL_RAMP_SECONDS: f32 = 0.006;
 
-/// One control value moving linearly to its target, one sample at a time.
-/// The remaining step is kept between callbacks, so a ramp that spans several
-/// blocks keeps its slope instead of restarting at every block boundary.
+/// The remaining step is kept across callbacks, so a ramp does not restart
+/// at a block boundary.
 #[derive(Clone, Copy)]
 pub(crate) struct Ramp {
     current: f32,
@@ -30,15 +28,14 @@ impl Ramp {
         }
     }
 
-    /// Adopts a value without moving: used for the first block of a mixer.
+    /// The first block adopts the live value instead of fading to it.
     pub(crate) fn snap(&mut self, target: f32) {
         self.current = target;
         self.target = target;
         self.step = 0.0;
     }
 
-    /// Points the ramp at `target`; the move takes `samples` samples.  A
-    /// target that did not change leaves a ramp that is still moving alone.
+    /// A target that did not change leaves a ramp that is still moving.
     pub(crate) fn set_target(&mut self, target: f32, samples: f32) {
         if target == self.target {
             return;
@@ -59,14 +56,11 @@ impl Ramp {
         }
     }
 
-    /// Whether the ramp rests on `value` (its last sample was `value`).
     pub(crate) fn is_settled_at(&self, value: f32) -> bool {
         self.current == value && self.target == value
     }
 
-    /// Moves one sample and returns the value to apply.  Once the target is
-    /// reached it returns exactly the target for the rest of the block, so a
-    /// settled ramp adds no noise to the audio.
+    /// Lands on the target exactly, so a settled ramp adds no noise.
     pub(crate) fn next(&mut self) -> f32 {
         if self.current != self.target {
             let next = self.current + self.step;
@@ -82,10 +76,7 @@ impl Ramp {
     }
 }
 
-/// The per-sample control ramps at the front of one path.  Routing is
-/// linear, so a route change is eight gains moving between 0 and 1; channel
-/// enable and mono work the same way.  Mute and the master level are one
-/// ramp after the paths, on the mixer itself.
+/// Route, enable and mono.  Mute and the master live on the mixer.
 pub(super) struct PathRamps {
     route: [[Ramp; 4]; 2],
     output_enabled: [Ramp; 2],
@@ -101,8 +92,7 @@ impl PathRamps {
         }
     }
 
-    /// First block: adopt the live settings directly, so starting a bridge
-    /// neither fades in nor jumps to them.
+    /// The first block adopts the live settings instead of fading to them.
     pub(super) fn snap(&mut self, routes: &[[f32; 4]; 2], enabled: [f32; 2], mono: f32) {
         for (row, targets) in self.route.iter_mut().zip(routes) {
             for (ramp, target) in row.iter_mut().zip(targets) {
@@ -133,8 +123,7 @@ impl PathRamps {
         self.mono.set_target(mono, samples);
     }
 
-    /// Routing, channel enable and mono for one input frame.  This is applied
-    /// before the EQ and the plugin chain, where those controls always acted.
+    /// Routing, enable and mono for one frame, before the EQ and the chain.
     pub(super) fn next_input(&mut self, left: f32, right: f32) -> [f32; 4] {
         let mut routes = [[0.0f32; 4]; 2];
         for (input, row) in routes.iter_mut().enumerate() {
@@ -156,8 +145,6 @@ impl PathRamps {
     }
 }
 
-/// One step of the dropout fade-out, snapping to 0 instead of stopping a
-/// rounding error above it.
 pub(crate) fn fade_down(gain: f32, step: f32) -> f32 {
     let next = gain - step;
     if next < step * 0.5 {
@@ -167,7 +154,6 @@ pub(crate) fn fade_down(gain: f32, step: f32) -> f32 {
     }
 }
 
-/// One step of the fade-in, snapping to 1 the same way.
 pub(crate) fn fade_up(gain: f32, step: f32) -> f32 {
     let next = gain + step;
     if next > 1.0 - step * 0.5 {

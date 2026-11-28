@@ -1,7 +1,5 @@
-// A Rust stand-in for a single-component VST3 effect, loaded through the
-// real load sequence (`Vst3Controller::assemble`) and run through the
-// format-neutral `LoadedPlugin` and `PluginHandle`, so the host's restart,
-// edit and state handling is tested without a plugin binary.
+// A Rust stand-in, through `Vst3Controller::assemble` and `LoadedPlugin`,
+// so restart, edit, and state are tested without a plugin binary.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
@@ -27,10 +25,8 @@ use crate::audio::vst3::{IO_CHANGED, LATENCY_CHANGED, PARAM_VALUES_CHANGED, RELO
 /// The stand-in's one control, a gain with default 0.5.
 const GAIN: u32 = 5;
 
-/// The stand-in: one audio bus each way, a gain control, a latency it
-/// reports, and the restarts it raises on activation.  The controller's
-/// value and the processor's gain are kept apart, as in a real plugin: the
-/// processor only gets a value through `process`.
+/// One bus each way.  The controller's value and the processor's gain
+/// stay apart: the processor only gets a value through `process`.
 #[derive(Default)]
 struct Fake {
     /// The controller's value, `f64` bits.

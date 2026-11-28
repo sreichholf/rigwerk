@@ -1,12 +1,8 @@
-//! What both halves of a loaded plugin share: [`PluginShared`] (atomics
-//! only, so the audio thread, the UI and the plugin's own callbacks may all
-//! touch it), the parameter id table [`ParamIds`], and the single UI→audio
-//! parameter producer [`ParamOut`].  Format-neutral.
+//! Atomics shared by both halves, the UI, and the plugin's own callbacks.
+//! Nothing here blocks the audio thread.
 //!
-//! Nothing here blocks the audio thread.  [`ParamOut`] has two mutexes, but
-//! they are UI-side: a call from another thread (a plugin's `performEdit`
-//! from its own or the audio thread) only `try_lock`s them and drops the
-//! value when they are busy.
+//! [`ParamOut`]'s mutexes are UI-side.  A `performEdit` from another
+//! thread only `try_lock`s them and drops the value when they are busy.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, TryLockError};
@@ -20,9 +16,8 @@ use super::transfer::ParamSender;
 /// flags use the low bits.
 pub(crate) const RESTART_ACTIVATION: u32 = 1 << 31;
 
-/// The state both halves of one loaded plugin and its host callbacks share.
-/// Atomics only: no lock, no allocation, so any thread may call any method
-/// (the comments say which thread is expected to).
+/// Atomics only: no lock, no allocation, so any thread may call.  The
+/// comments say which thread is expected to.
 pub(crate) struct PluginShared {
     pub(crate) pause: PauseHandshake,
     /// Clamped latency in samples, read after every activation (UI).
@@ -58,8 +53,7 @@ impl PluginShared {
         self.latency.load(Ordering::Acquire)
     }
 
-    /// Stores a freshly read latency (clamped).  Returns whether it moved,
-    /// which also leaves it for [`Self::take_latency_change`].
+    /// Clamped.  A change is left for [`Self::take_latency_change`].
     pub(crate) fn set_latency(&self, samples: u32) -> bool {
         let samples = clamp_latency(samples);
         let changed = self.latency.swap(samples, Ordering::AcqRel) != samples;
@@ -69,17 +63,16 @@ impl PluginShared {
         changed
     }
 
-    /// Whether the latency moved since the last call.
     pub(crate) fn take_latency_change(&self) -> bool {
         self.latency_unseen.swap(false, Ordering::AcqRel)
     }
 
-    /// A plugin callback asks for restart work (any thread).
+    /// Any thread.
     pub(crate) fn request_restart(&self, bits: u32) {
         self.restart.fetch_or(bits, Ordering::AcqRel);
     }
 
-    /// The restart work asked for so far, cleared (UI, once paused).
+    /// UI, once paused.  Cleared.
     pub(crate) fn take_restart(&self) -> u32 {
         self.restart.swap(0, Ordering::AcqRel)
     }
@@ -88,8 +81,7 @@ impl PluginShared {
         self.restart.load(Ordering::Acquire) != 0
     }
 
-    /// Records the first processing failure (audio thread; no allocation).
-    /// A later one is ignored.
+    /// Audio thread; no allocation.  The first failure sticks.
     pub(crate) fn fail(&self, failure: ProcessFailure) {
         let _ =
             self.failure
@@ -128,9 +120,8 @@ impl PluginShared {
     }
 }
 
-/// Why a loaded effect stopped processing.  `Copy` and heap-free, so the
-/// audio thread records it in [`PluginShared`] without allocating; the UI
-/// writes the text ([`Self::message`]).
+/// `Copy` and heap-free, so the audio thread records it without
+/// allocating.  The UI writes the text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProcessFailure {
     /// VST3 `process` returned this `tresult`.
@@ -155,10 +146,9 @@ pub(crate) enum ClapFailure {
     StartFailed,
 }
 
-/// Why an LV2 effect stopped processing.  LV2's `run` returns nothing, so a
-/// failure is an activation one.  `activate` also returns void, so a
-/// reactivation that cannot be called is the only failure left: there is no
-/// distinct "activation failed" kind to report.
+/// LV2 `run` and `activate` return nothing, so a failure is only a
+/// reactivation that cannot be called.  There is no separate "activation
+/// failed".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Lv2Failure {
     /// `run` was asked for while the instance is not active.
@@ -213,7 +203,7 @@ impl ClapFailure {
     }
 }
 
-/// Kinds in the high word of a packed failure; 0 is none.
+/// High word of a packed failure; 0 is none.
 const FAILURE_VST3: u64 = 1;
 const FAILURE_VST3_START: u64 = 2;
 const FAILURE_CLAP: u64 = 3;
@@ -223,7 +213,7 @@ const FAILURE_LV2: u64 = 6;
 const FAILURE_PAUSE_STRANDED: u64 = 7;
 
 impl ProcessFailure {
-    /// The text the effect's error shows (UI thread).
+    /// UI thread.
     pub(crate) fn message(self) -> String {
         match self {
             ProcessFailure::Vst3(code) => format!("Plugin process() failed: {code:#x}"),
@@ -271,8 +261,8 @@ impl ProcessFailure {
     }
 }
 
-/// Index ↔ id for one loaded plugin, built at load and never changed.  The
-/// index is the position in the plugin's parameter list.
+/// Built at load and never changed.  The index is the position in the
+/// plugin's parameter list.
 pub(crate) struct ParamIds {
     ids: Box<[u32]>,
     /// `(id, index)`, sorted by id.
@@ -301,7 +291,7 @@ impl ParamIds {
         self.ids.get(index).copied()
     }
 
-    /// Binary search; no allocation, so any thread may call it.
+    /// No allocation, so any thread may call it.
     pub(crate) fn index_of(&self, id: u32) -> Option<usize> {
         self.by_id
             .binary_search_by_key(&id, |(id, _)| *id)
@@ -310,9 +300,8 @@ impl ParamIds {
     }
 }
 
-/// The single logical UI→audio parameter producer of one plugin: the panel
-/// and a VST3 editor's `performEdit` both push here, serialised by the
-/// sender mutex (UI-side only; the audio thread holds the receiver).
+/// The panel and a VST3 editor's `performEdit` both push here, serialised
+/// by the sender mutex.  UI-side only; the audio thread holds the receiver.
 pub(crate) struct ParamOut {
     /// Cached at construction (the UI thread loads plugins), so a call
     /// never reads the process-wide main-thread record.
@@ -342,7 +331,7 @@ impl ParamOut {
         }
     }
 
-    /// Queues a panel value for the audio side at offset 0 (UI thread).
+    /// UI thread: this locks, it does not try-lock.
     pub(crate) fn push(&self, index: usize, value: f64) -> bool {
         self.sender
             .lock()
@@ -350,10 +339,9 @@ impl ParamOut {
             .push(index, value, 0)
     }
 
-    /// An editor edit (`performEdit`): queued for the audio side and kept
-    /// for the next [`Self::take_edits`].  From any other thread than the
-    /// UI it only try-locks and drops the value when busy, so a plugin that
-    /// edits from its audio thread never blocks it.
+    /// Queued for the audio side and kept for [`Self::take_edits`].  Off
+    /// the UI thread this only try-locks and drops the value when busy, so
+    /// an edit from the audio thread never blocks it.
     pub(crate) fn push_edit(&self, id: u32, value: f64) -> bool {
         let Some(index) = self.ids.index_of(id) else {
             return false;
@@ -382,7 +370,6 @@ impl ParamOut {
         true
     }
 
-    /// Moves the edits since the last call into `out` (cleared first).
     pub(crate) fn take_edits(&self, out: &mut Vec<(u32, f64)>) {
         if self.dropped.swap(false, Ordering::Relaxed)
             && !self.dropped_logged.swap(true, Ordering::Relaxed)
@@ -394,7 +381,6 @@ impl ParamOut {
         out.append(&mut edits);
     }
 
-    /// Values pushed so far (see [`ParamSender::pushed`]).
     pub(crate) fn pushed(&self) -> u64 {
         self.sender
             .lock()
@@ -402,8 +388,6 @@ impl ParamOut {
             .pushed()
     }
 
-    /// The push count up to which the plugin has applied every value
-    /// (see [`ParamSender::applied`]).
     pub(crate) fn applied(&self) -> u64 {
         self.sender
             .lock()
@@ -411,7 +395,6 @@ impl ParamOut {
             .applied()
     }
 
-    /// Whether a pushed value has not reached the audio side yet.
     pub(crate) fn has_queued(&self) -> bool {
         self.sender
             .lock()
@@ -420,7 +403,7 @@ impl ParamOut {
     }
 }
 
-/// Locks on the UI thread; only try-locks elsewhere.
+/// Locks on the UI thread; try-locks elsewhere.
 fn lock_or_try<T>(mutex: &Mutex<T>, block: bool) -> Option<std::sync::MutexGuard<'_, T>> {
     if block {
         return Some(mutex.lock().unwrap_or_else(PoisonError::into_inner));

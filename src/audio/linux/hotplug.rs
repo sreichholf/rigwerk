@@ -1,19 +1,11 @@
-//! Sound-card add and remove events from the kernel.
-//!
-//! A configuration probe cannot tell "unplugged" from "busy": opening an
-//! ALSA PCM that the bridge already holds fails, and the old scan treated
-//! that failure as the device going away. The kernel publishes the real
-//! change on the uevent netlink. The UI thread only enumerates when one of
-//! those messages names the sound subsystem, and still polls slowly so a
-//! PipeWire node that never creates a sound card is not missed.
+//! A probe cannot tell an unplugged ALSA PCM from a busy one: opening the
+//! card the bridge holds fails.  Sound changes come from the uevent netlink.
+//! The slow poll stays, so a PipeWire node with no sound card is not missed.
 
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
-/// `true` when a uevent is a sound device appearing, leaving, or changing.
-///
-/// Messages are NUL-separated `KEY=value` fields, sometimes with a first
-/// line like `add@/devices/...`.
+/// NUL-separated `KEY=value` fields, sometimes a first line `add@/devices/...`.
 pub(crate) fn uevent_is_sound_change(message: &str) -> bool {
     let mut action = false;
     let mut sound = false;
@@ -38,10 +30,8 @@ pub(crate) fn uevent_is_sound_change(message: &str) -> bool {
     action && sound
 }
 
-/// Blocks until a sound uevent arrives, then sends on the channel.
-///
-/// If the netlink socket cannot be opened, the thread exits and the caller
-/// keeps its slow poll. One process-wide watch is enough.
+/// If the netlink socket cannot open, the thread exits and the caller keeps
+/// its slow poll.  One process-wide watch is enough.
 pub(crate) fn spawn() -> Receiver<()> {
     let (sender, receiver) = mpsc::channel();
     let _ = thread::Builder::new()

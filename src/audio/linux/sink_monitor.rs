@@ -1,17 +1,10 @@
-//! A capture stream on the clock sink's monitor ports, opened only while
-//! Low latency runs, so the Live Issues strip can tell a sink that went
-//! silent from a guitar rest (`app::issues::silence`).
-//!
-//! It is its own PipeWire client on its own thread and main loop, opened
-//! and closed by the engine (the UI thread), never by a bridge callback.
-//! The process callback only folds the block's peak into an atomic and
-//! counts the block: no allocation, no lock, no logging.  A panic is caught
-//! there and leaves the reading stale rather than unwinding into PipeWire.  The stream is
-//! passive and asks for the low quantum, so it neither keeps the sink
-//! awake nor raises the graph block.  A native sink is targeted by name;
-//! the ALSA `pipewire` shim plays to the default sink, so that is the one
-//! monitored.  When nothing links, no block arrives and the reading stays
-//! `None`: the detection is inert rather than guessing.
+//! Clock-sink monitor, only while low latency runs, so a silent sink is
+//! not read as a guitar rest.  The engine opens it on its own thread; a
+//! bridge callback never does.  The process callback only stores a peak
+//! (no allocation); a panic leaves the reading stale instead of unwinding
+//! into PipeWire.  Passive, at the low quantum, so it neither keeps the
+//! sink awake nor raises the graph block.  A native sink is named; the
+//! ALSA `pipewire` shim monitors the default.  Nothing linked stays `None`.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -32,23 +25,18 @@ const MONITOR_NODE: &str = "RigWerk Sink Monitor";
 /// A reading older than this is no reading: the monitor stopped flowing.
 const STALE_AFTER: Duration = Duration::from_millis(250);
 
-/// What the process callback publishes.
 #[derive(Debug, Default)]
 pub(crate) struct MonitorMeter {
-    /// The largest |sample| since the last read, as f32 bits.  Non-negative
-    /// floats order like their bits, so `fetch_max` keeps the peak.
+    /// Peak |sample| as f32 bits.  Non-negative floats order like their
+    /// bits, so `fetch_max` keeps the peak.
     peak: AtomicU32,
-    /// Blocks seen since the stream opened.
     blocks: AtomicU64,
-    /// Set when the process callback caught a panic.  The reading then stays
-    /// stale (`None`), which is what a monitor that stopped flowing reports.
+    /// The process callback panicked.  The reading stays stale (`None`).
     failed: AtomicBool,
 }
 
 impl MonitorMeter {
-    /// Folds one block's peak in (the audio thread's side).  A meter whose
-    /// callback already panicked publishes nothing: the reading goes stale
-    /// instead of counting further blocks.
+    /// After a panic, publishes nothing so the reading goes stale.
     pub(crate) fn note_block(&self, peak: f32) {
         if self.failed.load(Ordering::Relaxed) {
             return;
@@ -58,19 +46,17 @@ impl MonitorMeter {
         self.blocks.fetch_add(1, Ordering::Release);
     }
 
-    /// Marks the callback as failed.  One relaxed store, safe on the audio
-    /// thread; the reader sees those blocks stop and the reading go stale.
+    /// One relaxed store: safe on the audio thread.  The reader then sees
+    /// the blocks stop.
     pub(crate) fn note_failure(&self) {
         self.failed.store(true, Ordering::Relaxed);
     }
 
-    /// Whether the process callback already panicked.
     pub(crate) fn failed(&self) -> bool {
         self.failed.load(Ordering::Relaxed)
     }
 }
 
-/// The reading side, kept by the engine.
 #[derive(Debug, Default)]
 pub(crate) struct MonitorReader {
     seen_blocks: u64,
@@ -79,8 +65,7 @@ pub(crate) struct MonitorReader {
 }
 
 impl MonitorReader {
-    /// The monitor's peak since the last read, or `None` while no block has
-    /// arrived within [`STALE_AFTER`].
+    /// `None` when no block arrived within [`STALE_AFTER`].
     pub(crate) fn read(&mut self, meter: &MonitorMeter, now: Instant) -> Option<f32> {
         let blocks = meter.blocks.load(Ordering::Acquire);
         if blocks != self.seen_blocks {
@@ -94,8 +79,8 @@ impl MonitorReader {
     }
 }
 
-/// The largest |sample| among the f32 samples of a `spa_chunk`, bounded by
-/// the mapped bytes so a bogus chunk cannot read past them.
+/// Peak |sample| in a `spa_chunk`, bounded by the mapped bytes so a bogus
+/// chunk cannot read past them.
 pub(crate) fn chunk_peak(bytes: &[u8], offset: u32, size: u32) -> f32 {
     if bytes.is_empty() {
         return 0.0;
@@ -109,9 +94,8 @@ pub(crate) fn chunk_peak(bytes: &[u8], offset: u32, size: u32) -> f32 {
         .fold(0.0, f32::max)
 }
 
-/// Which sink a clock output id plays to: `Some(Some(name))` for a native
-/// node, `Some(None)` for the default sink behind the ALSA shim, `None`
-/// for an output that is not a PipeWire sink.
+/// `Some(Some(name))` is a native node, `Some(None)` the default sink
+/// behind the ALSA shim, `None` an output that is not a PipeWire sink.
 pub(crate) fn monitor_target(output_id: &str) -> Option<Option<String>> {
     if let Some(name) = node_name(output_id) {
         Some(Some(name.to_owned()))
@@ -122,8 +106,8 @@ pub(crate) fn monitor_target(output_id: &str) -> Option<Option<String>> {
     }
 }
 
-/// A running sink monitor.  Dropping it asks its thread to stop; the
-/// thread ends on its own within one stop-timer tick.
+/// Drop asks the thread to stop.  It ends on its own within one
+/// stop-timer tick.
 pub(crate) struct SinkMonitor {
     meter: Arc<MonitorMeter>,
     reader: MonitorReader,
@@ -132,10 +116,9 @@ pub(crate) struct SinkMonitor {
 }
 
 impl SinkMonitor {
-    /// Starts monitoring the sink `output_id` plays to, or `None` when it
-    /// is not a PipeWire sink or the thread cannot start.  Connecting
-    /// happens on the monitor's thread; a failure there leaves the reading
-    /// `None`.
+    /// `None` when the output is not a PipeWire sink or the thread cannot
+    /// start.  Connecting happens on the monitor's thread; a failure there
+    /// leaves the reading `None`.
     pub(crate) fn open(output_id: &str, rate: u32) -> Option<Self> {
         let target = monitor_target(output_id)?;
         let meter = Arc::new(MonitorMeter::default());
@@ -169,7 +152,6 @@ impl Drop for SinkMonitor {
     }
 }
 
-/// The monitor's main loop, until `stop`.
 pub(crate) fn run(
     target: Option<&str>,
     rate: u32,
@@ -208,9 +190,8 @@ pub(crate) fn run(
             if meter.failed() {
                 return;
             }
-            // The whole block is counted, the chunk scan included (see
-            // `audio::rt_guard`).  A panic must not unwind into PipeWire's
-            // callback; it stops the reading instead of the process.
+            // The chunk scan is inside the guard (see `audio::rt_guard`).
+            // A panic must not unwind into PipeWire; it stops the reading.
             let panicked = contain(|| {
                 let _no_allocations = RtGuard::enter();
                 let Some(mut buffer) = stream.dequeue_buffer() else {

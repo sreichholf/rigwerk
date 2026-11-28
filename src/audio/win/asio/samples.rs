@@ -1,5 +1,3 @@
-//! Reading and writing ASIO's many sample formats as f32.
-
 pub(crate) unsafe fn write_asio_sample(
     ptr: *mut u8,
     frame: usize,

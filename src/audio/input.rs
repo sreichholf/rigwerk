@@ -1,6 +1,10 @@
-//! Opening the capture side through cpal and pushing its frames into the
-//! ring.  The capture arithmetic the four input backends share is
-//! [`InputStage`]; each backend keeps its own loop, sink and mono rule.
+//! [`InputStage`] is the capture order every backend shares.  The tuner
+//! tap is taken before the channel mute, so a muted channel still reaches
+//! the tuner, and the scope sees the post-mute frame.
+//!
+//! The mono copy, the sink, and when the block size is noted stay in each
+//! backend: the sites disagree.  A calibration arm is re-read per frame,
+//! so it is not latched here.  No allocation, no lock.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -14,31 +18,6 @@ use super::shared::{CallbackFailure, Shared};
 use super::thread_priority::PromoteOnce;
 use super::types::StartConfig;
 
-/// One input callback's capture arithmetic: the raw frame through the
-/// measurement, the gain, the tuner tap, the channel enable and the peak.
-/// Every input backend runs this same order, so it lives here once; the
-/// loop around it, and what it pushes the result into, stay each backend's
-/// own.
-///
-/// The order is load-bearing.  The tap is taken before the channel enable,
-/// so a muted channel still reaches the tuner; taking it after the mute
-/// silences the tuner while the audio still sounds right.  The scope is fed
-/// the post-mute frame, so it correctly shows a muted channel as flat.
-///
-/// Deliberately not absorbed here, because the sites disagree on it:
-/// - the mono rule: a source with one channel copies its only sample to
-///   both sides before calling [`Self::frame`];
-/// - the sink: [`Shared::push_frame`] into the bridge ring on cpal, ASIO and
-///   `native::push_capture`, or [`Shared::push_scope_in`] plus the scratch
-///   pair on the direct node, which never pushes the ring;
-/// - [`Shared::note_input_block`], which the sites time differently: before
-///   the loop, when the driver starts, or only while the node has a linked
-///   input;
-/// - the `has_input` gate the duplex node needs when its ports are unlinked;
-/// - a calibration arm that changes mid-block: [`Shared::capture_calibration`]
-///   re-reads it per frame, so latching it here would be a behaviour change.
-///
-/// No allocation, no lock, no logging: it runs on the audio thread.
 pub(crate) struct InputStage {
     gain: f32,
     enabled_l: bool,
@@ -48,8 +27,8 @@ pub(crate) struct InputStage {
 }
 
 impl InputStage {
-    /// Hoists the per-block settings: the input gain and the two channel
-    /// enables.  Call it once per callback, before the first frame.
+    /// Once per callback, before the first frame.  The gain and the channel
+    /// enables are latched for the block.
     pub(crate) fn new(shared: &Shared) -> Self {
         Self {
             gain: shared.input_gain(),
@@ -60,11 +39,8 @@ impl InputStage {
         }
     }
 
-    /// One raw frame, in the order every capture callback uses, returning
-    /// what the caller publishes (the frame after the channel enable).
     pub(crate) fn frame(&mut self, shared: &Shared, raw_l: f32, raw_r: f32) -> (f32, f32) {
-        // A calibration capture is raw, so a hot input gain cannot be
-        // mistaken for the device clipping.
+        // Raw, so a hot input gain is not mistaken for the device clipping.
         shared.capture_calibration(raw_l, raw_r);
         let mut left = raw_l * self.gain;
         let mut right = raw_r * self.gain;
@@ -80,24 +56,19 @@ impl InputStage {
         (left, right)
     }
 
-    /// Writes this block's peaks.  Once per callback, after the last frame.
     pub(crate) fn publish(&self, shared: &Shared) {
         shared.in_l.store(self.peak_l.to_bits(), Ordering::Relaxed);
         shared.in_r.store(self.peak_r.to_bits(), Ordering::Relaxed);
     }
 }
 
-/// The whole frames in one interleaved cpal block.  A trailing chunk shorter
-/// than `channels` is not a frame: the loop reads whole frames only, so a
-/// short tail cannot be indexed as a stereo pair.  A zero channel count has
-/// no frames.
+/// A trailing chunk shorter than `channels` is not a frame, and a zero
+/// channel count has none.
 pub(crate) fn whole_frames(samples: usize, channels: usize) -> usize {
     samples.checked_div(channels).unwrap_or(0)
 }
 
-/// Runs one interleaved capture block: every whole frame through
-/// [`InputStage`], then the block's peaks and counters.  A caught panic marks
-/// the run failed and leaves the counters and the tap untouched, so a block
+/// A caught panic leaves the counters and the tap untouched, so a block
 /// that did not play is not counted as delivered.
 pub(crate) fn input_block<T>(data: &[T], channels: usize, shared: &Shared)
 where
@@ -118,14 +89,12 @@ where
             shared.push_frame(left, right);
         }
         stage.publish(shared);
-        // The counts follow the delivery: a body that panicked put nothing in
-        // the ring, so this block did not arrive.
+        // A panicked body put nothing in the ring, so this block did not arrive.
         shared.note_input_block(frames);
         shared.note_input_frames(frames);
     });
     if panicked {
-        // No output buffer to silence on the capture side; the flag is what
-        // stops the run.
+        // No output buffer to silence.  The flag is what stops the run.
         shared.note_callback_failure(CallbackFailure::Panic);
     }
 }
@@ -144,8 +113,7 @@ pub(crate) fn open_input_device(config: &StartConfig) -> Result<cpal::Device, St
         .ok_or_else(|| "The selected input disappeared".to_owned())
 }
 
-/// Opens the capture stream, asking for the input-side buffer first and the
-/// host's default if the device will not take a fixed size.
+/// The host's default if the device will not take a fixed size.
 pub(crate) fn make_input_stream(
     device: &cpal::Device,
     config: cpal::SupportedStreamConfig,
@@ -211,11 +179,9 @@ where
                 // cpal's stream thread starts at normal priority on Linux.
                 promote.run();
                 let _denormals = DenormalGuard::new();
-                // Nothing in this callback may allocate (see `rt_guard`).
                 let _no_allocations = super::rt_guard::RtGuard::enter();
                 if gain_shared.callback_failure().is_some() {
-                    // A previous callback failed; the app is stopping this
-                    // run, and the chain must not be driven again.
+                    // The chain must not be driven again.
                     return;
                 }
                 input_block(data, channels, &gain_shared);

@@ -1,31 +1,17 @@
-//! The audio-thread half of a loaded LV2 plugin: the port buffers, `run`, and
-//! the control values that cross the transfer queues.
+//! The audio-thread half: port buffers and `run`.
 //!
-//! LV2 has no `start_processing`/`stop_processing`: `activate` and
-//! `deactivate` are instantiation-class calls done on the UI thread at load
-//! and teardown, so [`Lv2Processor::start`] and [`Lv2Processor::stop`] only
-//! exist to fill the format-neutral slot's protocol.  Everything here is an
-//! audio-class call or a write into a preallocated buffer.
+//! LV2 has no `start_processing`/`stop_processing`.  `activate` and
+//! `deactivate` are instantiation-class calls on the UI thread, so
+//! [`Lv2Processor::start`] and [`Lv2Processor::stop`] only fill the slot
+//! protocol.  Nothing here allocates, locks, logs or opens a file.  A
+//! control write always succeeds, so a drained value is applied; there is
+//! no retry.
 //!
-//! Normalised UI values arrive through the UI→audio transfer; at the start
-//! of a block they are denormalised with the shared range table and written
-//! into the control input buffers, which the plugin reads during `run`.
-//! Nothing is called on the plugin from the UI, and nothing here can fail to
-//! apply a value, so there is no retry.  Changed control outputs (meters,
-//! gain reduction) go back through the audio→UI transfer, and the latency
-//! port's value is published through [`Lv2Core`]'s atomics.
-//!
-//! Nothing here allocates, locks, logs or opens a file: the buffers, the
-//! ranges, the transfer rings and the worker's response buffer are sized at
-//! load, and every failure is a static [`Lv2Failure`].
-//!
-//! A plugin with `worker:interface` gets [`WorkerCallbacks`]: before each
-//! `run` the audio thread drains the response ring into one preallocated
-//! buffer and calls `work_response` for each message, and after `run` it
-//! calls `end_run` when the plugin has one (even with no response).  Both
-//! are audio-class calls.  The load's zero-frame `run` delivers responses
-//! the same way, on the UI thread, before this processor exists, and the
-//! teardown delivers what is left on the UI thread after it is gone
+//! Before each `run`, responses are drained into one preallocated buffer
+//! and `work_response` is called; `end_run` follows `run` when the plugin
+//! has one, response or not.  Both are audio-class.  The load's zero-frame
+//! `run` delivers responses on the UI thread before this processor exists,
+//! and teardown delivers what is left after it is gone
 //! (`worker::unregister`).
 
 use std::ffi::c_void;
@@ -40,9 +26,7 @@ use super::instance::Lv2Core;
 use super::ports::{Lv2Range, PortBuffers};
 use super::worker::{WorkerRings, RING_BYTES};
 
-/// The worker half of one instance's plugin calls: the rings the audio side
-/// drains, the buffer a response is popped into, and the two functions LV2
-/// makes audio-class.
+/// Audio-class worker calls for one instance.
 pub(crate) struct WorkerCallbacks {
     /// The instance's response ring.  The worker thread's `respond` writes
     /// it; while this processor exists, only it reads the ring.
@@ -50,7 +34,7 @@ pub(crate) struct WorkerCallbacks {
     /// The buffer one response is popped into; [`RING_BYTES`], sized at
     /// load so a block never allocates.
     pub(crate) responses: Vec<u8>,
-    /// `work_response`: one call per queued response, before `run`.
+    /// One call per queued response, before `run`.
     pub(crate) work_response:
         Option<unsafe extern "C" fn(LV2_Handle, u32, *const c_void) -> LV2_Worker_Status>,
     /// `end_run`: after every `run` when the plugin has one, response or
@@ -58,38 +42,32 @@ pub(crate) struct WorkerCallbacks {
     pub(crate) end_run: Option<unsafe extern "C" fn(LV2_Handle) -> LV2_Worker_Status>,
 }
 
-/// The audio-thread half.  It lives in the chain's slot; the UI only drops
-/// it, on teardown, after the slot left every chain.  Dropping it hands the
-/// buffers to the core, which frees them after `cleanup`.
+/// Lives in the chain slot.  Dropped on the UI thread after the slot left
+/// every chain.  Drop hands the buffers to the core, freed after `cleanup`.
 pub(crate) struct Lv2Processor {
-    /// Every declared port's buffer, connected once at load.  Moved into
-    /// [`Lv2Core::retired`] on drop, never freed here.
+    /// Connected once at load.  Moved into [`Lv2Core::retired`] on drop.
     pub(super) buffers: PortBuffers,
-    /// The ranges the transfers are indexed by, shared with the instance.
+    /// Shared with the instance, so both halves read one table.
     pub(super) ranges: Arc<[Lv2Range]>,
     pub(super) ids: Arc<ParamIds>,
     pub(super) from_ui: ParamReceiver,
     pub(super) to_ui: ParamSender,
-    /// The instance handle, owned by `core`.
     pub(super) handle: LV2_Handle,
-    /// `run`, resolved at load.  Never null for a loaded plugin.
+    /// Resolved at load.  Never null for a loaded plugin.
     pub(super) run: unsafe extern "C" fn(LV2_Handle, u32),
     /// The last output value reported per range, as `f32` bits, so only a
     /// value that moved crosses back.
     pub(super) reported: Vec<u32>,
     pub(super) max_block: usize,
-    /// The worker's responses and callbacks, when the plugin has a worker
-    /// interface.
     pub(super) worker: Option<WorkerCallbacks>,
-    /// The handle, which outlives the buffers once they are retired.
+    /// Outlives the buffers once they are retired.
     pub(super) core: Arc<Lv2Core>,
 }
 
 impl Drop for Lv2Processor {
-    /// The plugin points into the buffers until `cleanup`, and the instance
-    /// may hold the core for longer than this processor, so the buffers move
-    /// to the core instead of being freed here.  UI thread: the audio side
-    /// never drops a slot.  The move does not allocate.
+    /// The plugin points into the buffers until `cleanup`.  The instance may
+    /// hold the core longer, so the buffers move there.  UI thread: the
+    /// audio side never drops a slot.
     fn drop(&mut self) {
         let _ = self.core.retired.set(std::mem::take(&mut self.buffers));
     }
@@ -108,16 +86,13 @@ impl Lv2Processor {
         Ok(())
     }
 
-    /// LV2 has no processing stop: `deactivate` is an instantiation-class
-    /// call, so a teardown deactivates through the instance, not here.
+    /// LV2 has no processing stop.  `deactivate` is instantiation-class, on
+    /// the instance.
     pub(crate) fn stop(&mut self) -> Result<(), Lv2Failure> {
         Ok(())
     }
 
-    /// Runs the plugin over one buffer in place, in chunks of at most the
-    /// block size it was activated with.  UI values queued for it go into the
-    /// control buffers of the first chunk; changed control outputs and the
-    /// latency port are read after every chunk.
+    /// Chunks of at most the block size the plugin was activated with.
     pub(crate) fn process(
         &mut self,
         left: &mut [f32],
@@ -140,14 +115,14 @@ impl Lv2Processor {
             worker,
             core,
         } = self;
-        // A write into a control buffer always succeeds, so the values count
-        // as applied once this drain took them; no retry is needed.
+        // A control write always succeeds, so a drained value counts as
+        // applied; no retry.
         drain_values(ids, ranges, buffers, from_ui);
         let mut offset = 0;
         while offset < frames {
             let count = (frames - offset).min(*max_block);
-            // Auxiliary inputs and outputs stay silent; the plugin may write
-            // into any output or CV buffer.
+            // Auxiliary inputs stay silent.  The plugin may write any output
+            // or CV buffer.
             buffers.silence(count);
             buffers.copy_input(
                 &left[offset..offset + count],
@@ -155,8 +130,7 @@ impl Lv2Processor {
                 count,
             );
             buffers.reset_atoms();
-            // Responses the worker finished since the last block are
-            // audio-class calls, so they go in just before `run`.
+            // Responses are audio-class, so they go in just before `run`.
             if let Some(worker) = worker.as_mut() {
                 deliver_responses(
                     *handle,
@@ -200,11 +174,9 @@ impl Lv2Processor {
         Ok(())
     }
 
-    /// For a processing effect the chain skips (bypass, mix at 0): write the
-    /// queued UI values into the control buffers so the next processed block
-    /// and a later state save see them.  No plugin call is needed: LV2 reads
-    /// its control ports during `run`, which this does not make, and the
-    /// response ring waits for the next `run` in the same way.
+    /// Bypass or mix at 0: write queued UI values so the next block and a
+    /// later save see them.  No plugin call: LV2 reads controls during
+    /// `run`.  The response ring waits the same way.
     pub(crate) fn flush_if_queued(&mut self) {
         drain_values(
             &self.ids,
@@ -215,13 +187,10 @@ impl Lv2Processor {
     }
 }
 
-/// Hands every queued worker response to `work_response`, oldest first, in
-/// the run context.  `responses` is a whole ring, allocated at load.  A
-/// plugin without `work_response` has the response dropped rather than left
-/// in the ring, which would stall every later one.  The processor calls this
-/// before each `run`, the load's zero-frame run calls it before
-/// `run(handle, 0)`, and `worker::unregister` calls it at teardown, before
-/// `deactivate`, once the processor is gone.
+/// Oldest first, in the run context.  A plugin without `work_response`
+/// drops the response: leaving it would stall later ones.  Called before
+/// each `run`, before the load's `run(handle, 0)`, and by
+/// `worker::unregister` before `deactivate`.
 pub(super) fn deliver_responses(
     handle: LV2_Handle,
     rings: &WorkerRings,
@@ -249,10 +218,8 @@ pub(super) fn deliver_responses(
     }
 }
 
-/// Writes every queued UI value into its control buffer and reports the
-/// values applied.  A write always succeeds, so only a drain that deferred an
-/// overflow value (see [`ParamReceiver::drain`]) leaves the applied count
-/// alone; the next block or flush takes it.
+/// A write always succeeds.  Only a drain that deferred an overflow (see
+/// [`ParamReceiver::drain`]) leaves the applied count alone.
 fn drain_values(
     ids: &ParamIds,
     ranges: &[Lv2Range],

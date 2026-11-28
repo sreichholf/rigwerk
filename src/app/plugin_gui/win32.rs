@@ -1,9 +1,7 @@
-//! The Win32 window a CLAP editor embeds in.
-//!
-//! The window procedure only stores what happened (close, client size, new
-//! DPI) in atomics on a boxed state the window points at; the UI thread
-//! reads them in [`Win32Frame::poll`].  A fixed-size editor's window loses
-//! its sizing border, so the user cannot drag it to a size the view ignores.
+//! The window procedure only stores what happened, in atomics.  The UI
+//! thread reads them in [`Win32Frame::poll`].  A fixed-size editor
+//! loses its sizing border, so it cannot be dragged to a size the
+//! view ignores.
 
 use std::mem;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};

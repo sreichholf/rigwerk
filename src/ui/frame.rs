@@ -1,8 +1,5 @@
-//! The eframe shell: the window frame, its modals, the panic-mute chord and
-//! the size keys.
-//!
-//! `logic` and `save` only forward into `app`.  Their bodies stay there.
-//! Style is applied on the first pass here, so `app` does not import `ui`.
+//! The eframe shell.  `logic` and `save` only forward into `app`, and style
+//! is applied here so `app` does not import `ui`.
 
 use std::sync::Once;
 
@@ -17,8 +14,7 @@ use crate::ui::fonts::Face;
 use crate::ui::theme::ts;
 use crate::ui::theme::{configure_style, font, palette, with_alpha, TypeRole};
 
-/// Command and shift, and nothing else.  Command is Ctrl on Windows and
-/// Linux, and Command on macOS.  `matches_exact` rejects Alt; egui's
+/// Command and shift, and nothing else.  `matches_exact` rejects Alt;
 /// `consume_key` would treat that extra modifier as optional.
 const PANIC_MUTE_MODIFIERS: egui::Modifiers = egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT);
 
@@ -28,12 +24,9 @@ fn ensure_style(ctx: &egui::Context) {
 }
 
 impl eframe::App for RigWerkApp {
-    /// Non-painting maintenance.  eframe also calls this while the window is
-    /// hidden or minimized, with no egui pass, so engine watchdogs, device
-    /// watching, plugin main-thread/timer servicing and the Live Issues
-    /// state keep running.  The timed repaint request at the end is what
-    /// keeps those hidden passes coming: 16 ms while the bridge is live or
-    /// a plugin editor is open, otherwise 200 ms.
+    /// eframe also calls this with no egui pass while the window is hidden,
+    /// so the watchdogs keep running.  The repaint request brings the next
+    /// hidden pass: 16 ms while live, otherwise 200 ms.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ensure_style(ctx);
         let output_muted = self.publish_engine();
@@ -45,21 +38,16 @@ impl eframe::App for RigWerkApp {
         ensure_style(root.ctx());
         self.remember_native_window(frame);
         // eframe builds this root before `logic`, copying `global_style`
-        // into an `Arc`.  `configure_style` then copy-on-writes the context,
-        // and `logic` may already have fired the `Once`, so the root would
-        // keep egui defaults for the whole first pass.  Children clone this
-        // `Arc`; point it at the style now on the context before any of them
-        // are created.
+        // into an `Arc`.  Children clone that `Arc`, so point it at the
+        // style now on the context before any of them are created.
         root.set_style(root.ctx().global_style());
-        // Once per frame, before any page.  A control that only exists on
-        // Live or Mixer would miss the chord everywhere else.
+        // Once per frame, before any page, or a control that only exists on
+        // one screen would miss the chord everywhere else.
         self.handle_panic_mute(root.ctx());
         self.handle_size_keys(root.ctx());
 
         let ctx = root.ctx().clone();
         // Screenshots need a painted frame, so they stay on the drawing side.
-        // A run closes the window when it has its ending; `main` then exits
-        // with the code the run recorded.
         self.handle_screenshot(&ctx);
 
         let colours = palette(root.ctx());
@@ -101,7 +89,6 @@ impl eframe::App for RigWerkApp {
             )
             .show(root, |ui| self.status_bar(ui));
 
-        // The console lays out to the window edge: 12 pt padding (spec §5.2).
         let margin = if self.page == Page::Console {
             Margin::same(12)
         } else {
@@ -115,9 +102,8 @@ impl eframe::App for RigWerkApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(colours.bg).inner_margin(margin))
             .show(root, |ui| {
-                // The console, Mixer and Plugins scroll inside their own panes
-                // and fill the remaining height, so they stay outside the page
-                // ScrollArea.
+                // The console scrolls inside its own panes, so it stays outside
+                // the page ScrollArea.
                 if self.page == Page::Console {
                     return self.console_page(ui);
                 }
@@ -144,8 +130,8 @@ impl eframe::App for RigWerkApp {
             });
 
         if self.show_about {
-            // Fixed outer size so the window frame (and its right border) stays
-            // fully on-screen; inner content is capped below that.
+            // Fixed outer size so the frame, including its right border, stays
+            // on screen.
             egui::Window::new("About RigWerk")
                 .collapsible(false)
                 .resizable(false)
@@ -258,20 +244,16 @@ impl eframe::App for RigWerkApp {
         self.save_to(storage);
     }
 
-    /// A screenshot run starts from defaults and its screens are fixtures, so
-    /// closing its window leaves the stored egui memory alone too.
+    /// A screenshot run starts from defaults, so closing it leaves the stored
+    /// egui memory alone.
     fn persist_egui_memory(&self) -> bool {
         self.screenshot.is_none()
     }
 }
 
 impl RigWerkApp {
-    /// Ctrl+Shift+M toggles the master mute, the same switch as the mute
-    /// button (`toggle_mute`; the next `publish_engine` pass publishes it, and
-    /// the mixer ramps).  On macOS the chord is Command+Shift+M.  A second
-    /// press unmutes.  A text edit with focus keeps the key, and any modifier
-    /// other than command and shift (Alt, for one) does not count.  A held
-    /// key repeats; only the first press toggles.
+    /// A text edit with focus keeps the key.  A held key repeats; only the
+    /// first press toggles.
     pub(crate) fn handle_panic_mute(&mut self, ctx: &egui::Context) {
         if ctx.text_edit_focused() {
             return;
@@ -305,9 +287,8 @@ impl RigWerkApp {
         }
     }
 
-    /// Ctrl++ (or Ctrl+=) and Ctrl+− change the interface size by 10 %,
-    /// Ctrl+0 resets it to 100 %: egui's own zoom keys, which `app` turned
-    /// off so the size is RigWerk's saved preference.  Command on macOS.
+    /// egui's own zoom keys, which `app` turned off so the size stays the
+    /// saved preference.
     pub(crate) fn handle_size_keys(&mut self, ctx: &egui::Context) {
         use egui::gui_zoom::kb_shortcuts::{ZOOM_IN, ZOOM_IN_SECONDARY, ZOOM_OUT, ZOOM_RESET};
         let (reset, bigger, smaller) = ctx.input_mut(|input| {
@@ -327,9 +308,7 @@ impl RigWerkApp {
         }
     }
 
-    /// Save, the tuner, Setup, the effect browser (Ctrl+F) and Esc for the
-    /// innermost overlay.
-    /// A text field keeps the keys.  Command is Ctrl on Windows and Linux.
+    /// A text field keeps the keys.
     pub(crate) fn handle_shell_keys(&mut self, ctx: &egui::Context) {
         if ctx.text_edit_focused() {
             return;

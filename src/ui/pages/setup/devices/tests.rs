@@ -140,10 +140,8 @@ fn filter_group_skips_the_pinned_index_and_applies_search() {
     assert_eq!(indices, vec![1, 2]);
 }
 
-/// The blank filter is the common case: `filter_group` allocates its result
-/// list and nothing per device.  `RtGuard` counts allocation events, not
-/// bytes, so this pins that a 50-device list costs one event like a 2-device
-/// list does: the label clone the old path made per device was one more.
+/// A blank filter allocates the result list and nothing per device.
+/// `RtGuard` counts events, not bytes, so 50 devices cost the same as 2.
 #[test]
 fn a_blank_filter_does_not_allocate_per_device() {
     // Release builds count nothing, so the two are 0 there: a debug claim.
@@ -157,8 +155,8 @@ fn a_whitespace_filter_builds_no_label() {
     assert_eq!(allocations_for(2, "   "), allocations_for(50, "   "));
 }
 
-/// Allocation events one `filter_group` call makes over `count` devices.  It
-/// also checks every row comes through with its own device, in list order.
+/// Allocation events one `filter_group` call makes, and that every row
+/// comes through in list order.
 fn allocations_for(count: usize, filter: &str) -> usize {
     let devices: Vec<DeviceItem> = (0..count)
         .map(|index| item(&format!("Device {index}")))

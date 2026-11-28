@@ -1,9 +1,5 @@
-//! Scope readouts shared with the scope sheet: amplitudes as dBFS and
-//! compact sample counts.
-//!
-//! The traces themselves are drawn by the sheet (`ui/sheets/scope.rs`); the
-//! curves are decimated samples from the capture and playback paths
-//! (peak-hold bins), not a decorative oscillator.
+//! Shared scope readouts.  The traces are peak-hold bins from capture and
+//! playback, drawn by the sheet, not a decorative oscillator.
 
 pub(crate) fn amp_to_db(value: f32) -> f32 {
     if value <= 0.0001 {

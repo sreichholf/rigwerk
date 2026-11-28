@@ -6,7 +6,7 @@ fn started(bpm: f32, rhythm: ClickRhythm) -> Metronome {
     metronome
 }
 
-/// Sample indices where a click fires (its voice starts on that sample).
+/// Indices where a click fires (`voice.n` becomes 1 on that sample).
 fn fires(
     metronome: &mut Metronome,
     samples: usize,
@@ -23,7 +23,6 @@ fn fires(
     fired
 }
 
-/// Peak absolute sample of each click, in order, for `count` clicks.
 fn peaks(rhythm: ClickRhythm, count: usize) -> Vec<f32> {
     let mut metronome = started(120.0, rhythm);
     let mut peaks = Vec::new();
@@ -49,7 +48,6 @@ fn peaks(rhythm: ClickRhythm, count: usize) -> Vec<f32> {
     peaks
 }
 
-/// Samples from the start of a click until it first goes negative.
 fn first_negative(rhythm: ClickRhythm, beat: u8) -> usize {
     let mut metronome = started(120.0, rhythm);
     let mut seen = 0u8;
@@ -174,14 +172,13 @@ fn a_rhythm_change_waits_until_the_next_beat() {
     assert_eq!(fired[1], 24_000, "the beat in progress keeps its length");
     assert_eq!(fired[2] - fired[1], 24_000);
     // Beat 1 of 4/4 was already sounding.  3/4 takes over at the next
-    // click, on its one, so the bar that follows is three beats long.
+    // click, on its one, so the bar that follows is three beats.
     assert_eq!(&beats[..5], &[1, 1, 2, 3, 1], "{beats:?}");
 }
 
 #[test]
 fn a_rhythm_change_starts_the_new_bar_on_the_one() {
     let mut metronome = started(120.0, ClickRhythm::FourFour);
-    // Beat 1 of 4/4 fires on the first sample.
     let _ = metronome.next();
     assert_eq!(metronome.beat(), 1);
     metronome.latch(true, 120.0, ClickRhythm::ThreeFour, 48_000);
@@ -190,7 +187,6 @@ fn a_rhythm_change_starts_the_new_bar_on_the_one() {
     }
     assert_eq!(metronome.beat(), 1, "no click yet");
     assert_eq!(metronome.rhythm(), ClickRhythm::FourFour);
-    // The next click is the one of 3/4: an accent, not beat 2.
     let _ = metronome.next();
     assert_eq!(metronome.voice.n, 1, "a click fired");
     assert_eq!(metronome.rhythm(), ClickRhythm::ThreeFour);
@@ -314,9 +310,8 @@ fn an_unknown_rhythm_byte_is_four_four() {
 
 #[test]
 fn a_restart_lets_the_ringing_click_finish_under_the_new_one() {
-    // Stop 200 samples into the accent and start again 50 samples later,
-    // while that accent still rings.  The output is the old click on its
-    // own envelope plus a new click from the restart: nothing is cut.
+    // Stop 200 samples into the accent and start 50 later, while it still
+    // rings.  The output is the old envelope plus a new click: nothing is cut.
     let render = |metronome: &mut Metronome, samples: usize| -> Vec<f32> {
         (0..samples).map(|_| metronome.next()).collect()
     };

@@ -751,7 +751,8 @@ fn panic_chord_toggles_master_mute() {
 
     press_panic_chord(&mut app, &ctx, key_m(ctrl_shift(), true));
     assert!(app.mute, "Ctrl+Shift+M mutes");
-    // Still held: egui reports the next key-down as a repeat, which must not unmute.
+    // Still held: egui reports the next key-down as a repeat, which
+    // must not unmute.
     press_panic_chord(&mut app, &ctx, key_m(ctrl_shift(), true));
     assert!(app.mute, "holding the chord does not toggle again");
     press_panic_chord(&mut app, &ctx, key_m(ctrl_shift(), false));
@@ -800,7 +801,8 @@ fn panic_chord_does_not_toggle_while_a_text_edit_has_focus() {
     let _ = run_frame(&ctx, test_input(None), |ui| {
         ui.text_edit_singleline(&mut text).request_focus();
     });
-    // Focus lands on the next pass.  The field has to stay on screen or egui drops it.
+    // Focus lands on the next pass.  The field has to stay on screen
+    // or egui drops it.
     let _ = run_frame(&ctx, test_input(None), |ui| {
         ui.text_edit_singleline(&mut text);
     });

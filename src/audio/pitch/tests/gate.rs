@@ -1,6 +1,5 @@
-//! One row of the phase 0 score table (§4.2) and the gate it is held to
-//! (§4.3).  The always-on tests and the release harness both use these, so
-//! the regression suite and the printed table cannot disagree.
+//! One score row and the gate it is held to.  The always-on tests and
+//! the release harness both use these.
 
 use std::fmt;
 
@@ -254,12 +253,10 @@ pub(super) fn evaluate(
     row
 }
 
-/// The shifts the gate holds the pitch and leftovers at, and the median and
-/// 95th percentile error allowed there, cents: single notes and power
-/// chords at the drops, −1 … −12.  A period-synchronous splice pulls an
-/// inharmonic partial `k` towards `k·f0` by `(f_k − k·f0)(1 − r)`, a few
-/// cents by the tenth partial of a string.  The octave down's attacks,
-/// releases, level and beat, and the up-shifts, stay reported only.
+/// Median and 95th percentile, cents, for single notes and power
+/// chords at the drops.  A period-synchronous splice pulls inharmonic
+/// partial `k` toward `k·f0` by `(f_k − k·f0)(1 − r)`.  The octave
+/// down's other scores, and the up-shifts, stay reported only.
 fn in_pitch_gate(semitones: i8) -> Option<(f64, f64)> {
     (-12..=-1).contains(&semitones).then_some((8.0, 20.0))
 }

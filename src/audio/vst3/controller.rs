@@ -1,18 +1,10 @@
-//! The main-thread half of a loaded VST3 plugin, and its load sequence.
-//! [`Vst3Controller`] lives behind the plugin's UI-only lock
-//! (`PluginHandle`): the component's lifetime and activation, the edit
-//! controller (single component or separate, connected through the host
-//! proxies), parameters, state and the editor view.  It implements
-//! [`PluginHostUi`], so the shared handle reaches its parameters, state and
-//! service without naming VST3.  The audio-thread half is `processor.rs`.
+//! Main-thread half, behind the UI-only `PluginHandle` lock.  The
+//! audio-thread half is `processor.rs`.
 //!
-//! The load follows the SDK's call sequence (`plugprovider.cpp`): create
-//! and initialize the component, find or create the controller, restore
-//! the state and the saved values while inactive, negotiate the buses,
-//! set up processing, activate, and only then read the latency.
-//! Processing is not started here: the first audio block does that.
-//! Dropping the controller tears down in reverse, and the module goes
-//! last.
+//! Load follows the SDK sequence (`plugprovider.cpp`): initialize, find
+//! or create the controller, restore state while inactive, negotiate
+//! buses, set up, activate, then read latency.  Processing starts on the
+//! first audio block.  Drop tears down in reverse; the module goes last.
 
 use std::path::Path;
 use std::ptr;
@@ -58,7 +50,6 @@ const MAX_BUS_CHANNELS: usize = 32;
 const VST3_HANDLED: u32 =
     LATENCY_CHANGED | PARAM_VALUES_CHANGED | PARAM_TITLES_CHANGED | IO_CHANGED | RELOAD_COMPONENT;
 
-/// One parameter as the controller lists it.
 #[derive(Clone, Debug, PartialEq)]
 struct ParamInfo {
     id: u32,
@@ -82,7 +73,6 @@ impl ParamInfo {
     }
 }
 
-/// The main-thread half.
 pub(crate) struct Vst3Controller {
     /// The proxies between a separate controller and the component.
     connection: Option<Connection>,
@@ -113,8 +103,6 @@ pub(crate) struct Vst3Controller {
     _module: Option<Arc<Vst3Module>>,
 }
 
-/// What a load hands to `LoadedPlugin`: the two halves and the UI side's
-/// parts of the parameter transfers.
 pub(crate) struct Vst3Loaded {
     pub(crate) controller: Vst3Controller,
     pub(crate) processor: Vst3Processor,
@@ -129,7 +117,7 @@ pub(crate) struct Vst3Loaded {
     pub(crate) undelivered: Vec<u32>,
 }
 
-/// A stream holding `bytes`, as the plugin's `IBStream`.
+/// The wrapper must outlive the call: the `IBStream` points into it.
 fn stream(bytes: Vec<u8>) -> (ComWrapper<MemoryStream>, ComPtr<IBStream>) {
     let stream = ComWrapper::new(MemoryStream::new(bytes));
     let pointer = stream
@@ -144,8 +132,7 @@ fn ok_or_absent(result: i32) -> bool {
 }
 
 impl Vst3Controller {
-    /// Opens the bundle and loads one plugin from it at `sample_rate`,
-    /// restored from `restore`.  Main thread.
+    /// Main thread.
     pub(crate) fn load(
         path: &Path,
         class_id: Option<&str>,
@@ -160,8 +147,6 @@ impl Vst3Controller {
         Self::assemble(component, Some(module), sample_rate, restore, shared)
     }
 
-    /// The load sequence from a created component on: initialize, the
-    /// controller, parameters, state and values, buses, setup, activation.
     /// `module` is `None` only for the tests' Rust stand-ins.
     pub(super) fn assemble(
         component: ComPtr<IComponent>,
@@ -254,11 +239,8 @@ impl Vst3Controller {
             // activation.
             this.layout = this.read_layout()?;
             this.shared.set_latency(this.processor.getLatencySamples());
-            // The first value goes out with the views of the new effect.
+            // Consumed here: the views of the new effect publish it.
             this.shared.take_latency_change();
-            // What the plugin raised while it was set up and activated is
-            // done already: the buses were read after the arrangement, and
-            // the latency after the activation.
             this.settle_restart_flags();
 
             let processor = Vst3Processor::new(
@@ -283,13 +265,9 @@ impl Vst3Controller {
         }
     }
 
-    /// Clears the restart flags the host's own setup and activation made
-    /// the plugin raise: `kLatencyChanged` (the latency was just read after
-    /// activating), `kIoChanged` when the buses still match the
-    /// processor's, `kParamTitlesChanged` when the ids still match, and
-    /// `kReloadComponent` (this is the fresh load).  Some plugins raise
-    /// these on every activation; acting on them would restart or reload
-    /// the plugin forever.  Other flags are kept.
+    /// Drops the flags this load already answered.  Some plugins raise
+    /// them on every activation; acting on them would restart forever.
+    /// Other flags are kept.
     fn settle_restart_flags(&mut self) {
         let flags = self.shared.take_restart();
         let mut done = super::LATENCY_CHANGED | super::RELOAD_COMPONENT;
@@ -305,22 +283,20 @@ impl Vst3Controller {
         }
     }
 
-    /// The buses the processor was built for.
     #[cfg(test)]
     pub(crate) fn layout(&self) -> &BusLayout {
         &self.layout
     }
 
-    /// Whether the plugin's audio buses no longer match the layout the
-    /// processor was built for (`kIoChanged`).  Main thread.
+    /// Main thread.  `kIoChanged` when the buses no longer match the
+    /// layout the processor was built for.
     pub(crate) fn buses_changed(&self) -> bool {
         // SAFETY: a live component and processor, on the main thread.
         unsafe { self.read_layout() }.map_or(true, |layout| layout != self.layout)
     }
 
-    /// Finds the controller: the component itself, or the class it names,
-    /// created, initialized and connected.  A plugin without one loads
-    /// with no parameters and no editor.
+    /// The component itself, or the class it names.  With neither, the
+    /// plugin loads with no parameters and no editor.
     unsafe fn open_controller(&mut self, module: Option<&Vst3Module>) -> Result<(), String> {
         if let Some(controller) = self.component.cast::<IEditController>() {
             self.controller = Some(controller);
@@ -349,7 +325,6 @@ impl Vst3Controller {
         Ok(())
     }
 
-    /// The controller's parameter list, in its order.
     fn read_infos(&self) -> Vec<ParamInfo> {
         let Some(controller) = &self.controller else {
             return Vec::new();
@@ -366,11 +341,8 @@ impl Vst3Controller {
         }
     }
 
-    /// Restores a saved state while inactive: the component, then a
-    /// separate controller from the component state and its own.  With no
-    /// state a separate controller is synced from the component, so it
-    /// shows what the processor really has.  Returns whether the saved
-    /// state was restored.
+    /// While inactive.  With no saved state a separate controller is
+    /// synced from the component.  True when the saved state was restored.
     unsafe fn restore_state(&mut self, bytes: Option<&[u8]>) -> bool {
         let blob = bytes.and_then(|bytes| match decode_state(bytes) {
             Ok(blob) => Some(blob),
@@ -409,10 +381,8 @@ impl Vst3Controller {
         }
     }
 
-    /// Applies saved values (`None` meaning the default) to the controller
-    /// and queues them for the processor's first block.  Read-only controls
-    /// and ids the plugin no longer lists are skipped.  Returns the ids that
-    /// were applied (queued, not yet delivered to the processor).
+    /// `None` is the default.  Read-only controls and unknown ids are
+    /// skipped.  The returned ids are queued, not yet in the processor.
     unsafe fn restore_values(&mut self, values: &[(u32, Option<f64>)], out: &ParamOut) -> Vec<u32> {
         let mut applied = Vec::new();
         for (id, value) in values {
@@ -431,7 +401,6 @@ impl Vst3Controller {
         applied
     }
 
-    /// The audio bus counts and the main bus of each direction.
     unsafe fn buses(&self) -> Result<(usize, usize, Option<usize>, usize), String> {
         // SAFETY: the caller's contract; every out pointer is writable.
         unsafe {
@@ -489,8 +458,7 @@ impl Vst3Controller {
             .then_some(arrangement)
     }
 
-    /// Activates only the main audio buses and asks for a stereo
-    /// arrangement on them where the plugin accepts one.
+    /// Only the main audio buses.  Stereo where the plugin accepts it.
     unsafe fn negotiate_buses(&self) -> Result<(), String> {
         // SAFETY: the caller's contract; every out pointer is writable.
         unsafe {
@@ -536,8 +504,7 @@ impl Vst3Controller {
         }
     }
 
-    /// Every audio bus's channel count as the plugin has it now (its
-    /// arrangement, else its bus info), and the main buses.
+    /// Channel count from the arrangement, else the bus info.
     unsafe fn read_layout(&self) -> Result<BusLayout, String> {
         // SAFETY: the caller's contract.
         unsafe {
@@ -577,8 +544,8 @@ impl Vst3Controller {
         }
     }
 
-    /// The process context the processor starts with: the rate and the
-    /// continuous time, plus a tempo and time signature if the plugin asks.
+    /// Rate and continuous time, plus tempo and time signature when the
+    /// plugin asks.
     unsafe fn process_context(&self, rate: f64) -> ProcessContext {
         // SAFETY: an all-zero context is a valid value; the caller's
         // contract for the requirements query.
@@ -604,7 +571,6 @@ impl Vst3Controller {
         context
     }
 
-    /// `setParamNormalized`.
     pub(crate) fn set(&self, id: u32, value: f64) {
         if let Some(controller) = &self.controller {
             // SAFETY: a live controller, on the main thread.
@@ -612,14 +578,12 @@ impl Vst3Controller {
         }
     }
 
-    /// `getParamNormalized`.
     pub(crate) fn value(&self, id: u32) -> Option<f64> {
         let controller = self.controller.as_ref()?;
         // SAFETY: as in `set`.
         Some(unsafe { controller.getParamNormalized(id) })
     }
 
-    /// The plugin's own text for a normalized value of `id`.
     pub(crate) fn format(&self, id: u32, value: f64) -> Option<String> {
         let controller = self.controller.as_ref()?;
         let mut text: String128 = [0; 128];
@@ -643,7 +607,6 @@ impl Vst3Controller {
         }
     }
 
-    /// Reads every control from the controller.
     pub(crate) fn views(&self) -> Vec<PluginParamView> {
         self.infos
             .iter()
@@ -651,7 +614,6 @@ impl Vst3Controller {
             .collect()
     }
 
-    /// The views every control has at its default.
     pub(crate) fn default_views(&self) -> Vec<PluginParamView> {
         self.infos
             .iter()
@@ -659,7 +621,6 @@ impl Vst3Controller {
             .collect()
     }
 
-    /// The writable controls' defaults, `(index, normalized)`.
     pub(crate) fn default_values(&self) -> Vec<(usize, f64)> {
         self.infos
             .iter()
@@ -669,16 +630,14 @@ impl Vst3Controller {
             .collect()
     }
 
-    /// Whether `id` is a control the plugin does not let the host set.
     pub(crate) fn is_read_only(&self, id: u32) -> bool {
         self.ids
             .index_of(id)
             .is_some_and(|index| self.infos[index].read_only)
     }
 
-    /// Reads the parameter list again (`kParamTitlesChanged`).  False, and
-    /// the old list kept, when the ids changed: the processor and the
-    /// transfers were built for that table.
+    /// False, and the old list kept, when the ids changed: the processor
+    /// and the transfers were built for that table.
     pub(crate) fn rescan(&mut self) -> bool {
         let fresh = self.read_infos();
         let same = fresh.len() == self.infos.len()
@@ -692,20 +651,18 @@ impl Vst3Controller {
         same
     }
 
-    /// Whether the controller can create an editor view.
     fn has_editor(&self) -> bool {
         self.create_view().is_some()
     }
 
-    /// `createView("editor")`.
     pub(crate) fn create_view(&self) -> Option<ComPtr<IPlugView>> {
         let controller = self.controller.as_ref()?;
         // SAFETY: as in `set`; the view comes back with a reference.
         unsafe { ComPtr::from_raw(controller.createView(c"editor".as_ptr())) }
     }
 
-    /// The component's state, and a separate controller's, in the saved
-    /// envelope.  `getState` is allowed while the audio thread processes.
+    /// Component state, and a separate controller's.  `getState` is
+    /// allowed while the audio thread processes.
     pub(crate) fn save_state(&self) -> Result<Vec<u8>, String> {
         // Cleared first, so a change marked during the save is seen again.
         self.shared.take_state_dirty();
@@ -732,17 +689,14 @@ impl Vst3Controller {
         encode_state(&blob)
     }
 
-    /// Whether the component is active (a failed reactivation leaves it
-    /// inactive for good).
+    /// A failed reactivation leaves the component inactive for good.
     pub(crate) fn is_active(&self) -> bool {
         self.active
     }
 
-    /// Deactivates, sets up again and reactivates the component for
-    /// `kLatencyChanged`,
-    /// then reads the latency, which the plugin may only change while
-    /// inactive.  Main thread, with the plugin paused (no block inside,
-    /// processing stopped).  False when the reactivation failed.
+    /// For `kLatencyChanged`.  Latency may change only while inactive.
+    /// Main thread, paused, no block inside.  False when reactivation
+    /// failed.
     pub(crate) fn reactivate(&mut self) -> bool {
         // SAFETY: a live component and processor, on the main thread.
         unsafe {
@@ -768,14 +722,13 @@ impl Vst3Controller {
         self.active
     }
 
-    /// `setProcessing(false)` for a forced pause or a teardown: the caller
-    /// knows no block is inside the plugin.
+    /// The caller knows no block is inside the plugin.
     pub(crate) fn stop_processing(&self) {
         // SAFETY: as in `reactivate`.
         unsafe { self.processor.setProcessing(0) };
     }
 
-    /// `setActive(false)`, if active.  Main thread, with processing stopped.
+    /// Main thread, with processing stopped.
     pub(crate) fn deactivate(&mut self) {
         if self.active {
             // SAFETY: as in `reactivate`.

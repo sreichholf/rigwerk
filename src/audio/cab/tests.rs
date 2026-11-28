@@ -1,5 +1,3 @@
-//! The cabinet stage: sanitising, loading a WAV, partitioned convolution, and bypass.
-
 use super::{apply_tail_fade, CAB_MIN_HIGH_CUT_HZ};
 use super::{
     cab_note, load_cab_channels, prepare_cab_file, prepare_cab_samples, scan_cab_folder, CabFile,

@@ -1,15 +1,12 @@
-//! CLAP plugin state stream helpers.
-
 use std::ffi::c_void;
 use std::ptr;
 
 use clap_sys::stream::{clap_istream, clap_ostream};
 
-/// The most state bytes accepted from one plugin, so a runaway `save` cannot
-/// exhaust memory.
+/// The most state bytes accepted from one plugin, so a runaway `save`
+/// cannot exhaust memory.
 pub(super) const MAX_STATE_BYTES: usize = 8 * 1024 * 1024;
 
-/// Collects what a plugin writes in `clap_plugin_state.save`.
 #[derive(Default)]
 pub(super) struct StateWriter {
     pub(super) bytes: Vec<u8>,
@@ -17,8 +14,7 @@ pub(super) struct StateWriter {
 }
 
 impl StateWriter {
-    /// The stream handed to the plugin.  It points at `self`, so `self` must
-    /// stay in place while the plugin uses it.
+    /// Points at `self`.  `self` must stay put while the plugin uses it.
     pub(super) fn stream(&mut self) -> clap_ostream {
         clap_ostream {
             ctx: self as *mut Self as *mut c_void,
@@ -56,7 +52,6 @@ pub(super) unsafe extern "C" fn state_write(
     size as i64
 }
 
-/// Feeds saved bytes to `clap_plugin_state.load`.
 pub(super) struct StateReader<'a> {
     pub(super) data: &'a [u8],
     pub(super) position: usize,
@@ -67,8 +62,7 @@ impl<'a> StateReader<'a> {
         Self { data, position: 0 }
     }
 
-    /// The stream handed to the plugin.  It points at `self`, so `self` must
-    /// stay in place while the plugin uses it.
+    /// Points at `self`.  `self` must stay put while the plugin uses it.
     pub(super) fn stream(&mut self) -> clap_istream {
         clap_istream {
             ctx: self as *mut Self as *mut c_void,

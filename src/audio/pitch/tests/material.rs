@@ -1,27 +1,12 @@
-//! The phase 0 test material: a small additive synth with known partials.
+//! Additive notes with known partials, so a score knows the target
+//! frequencies.  Not Karplus–Strong: those partials are not closed form.
 //!
-//! Each note is a sum of sines (slight inharmonicity, a few ms attack,
-//! per-partial exponential decay, higher partials faster) plus a short seeded
-//! noise burst for the pick.  The same partial list scaled by the ratio
-//! renders the reference at the target pitch, so every score knows exactly
-//! which frequencies the output should hold.  Not Karplus–Strong: its
-//! partials are not known in closed form.
-//!
-//! A partial can beat: a real string vibrates in two polarisations whose
-//! frequencies differ slightly (the bridge's admittance is not the same
-//! across and along the top), and unison strings couple through the bridge,
-//! so a guitar partial is often a pair a fraction of a Hz to a few Hz apart,
-//! at unequal levels, the weaker one decaying more slowly (a two-stage
-//! decay).  [`beating`] turns a note's partials into such pairs; the values
-//! follow the literature (Weinreich, "Coupled piano strings", JASA 1977;
-//! Woodhouse, "On the synthesis of guitar plucks" and "Plucked guitar
-//! transients", Acta Acustica 2004; Erkut, Välimäki, Karjalainen, Laurson,
-//! "Extraction of physical and expressive parameters for model-based sound
-//! synthesis of the classical guitar", AES 108th Convention, 2000): about
-//! 0.1–0.5 Hz on the fundamental, growing with the partial number to a few
-//! Hz, the second component 5–10 dB down and decaying 1.5–3 times more
-//! slowly.  The scores count a pair as one partial at its power-weighted
-//! centre ([`partials_at`]).
+//! [`beating`] splits a partial into a pair.  The offsets follow
+//! Weinreich, JASA 1977; Woodhouse, Acta Acustica 2004; Erkut et al.,
+//! AES 108th, 2000: about 0.1–0.5 Hz on the fundamental, growing with
+//! the partial, the second component quieter and slower to decay.
+//! [`partials_at`] counts a pair as one partial at its power-weighted
+//! centre.
 
 use std::f64::consts::TAU;
 

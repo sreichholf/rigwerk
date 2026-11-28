@@ -1,35 +1,18 @@
-//! Shared LV2 module loading and the process-wide registry.
+//! One [`Lv2Module`] per binary, shared through [`ModuleRegistry`].  The OS
+//! shares one mapping, and a binary expects its globals set up once.
+//! Nothing else opens a binary: the scan reads Turtle only.
 //!
-//! A bundle names one binary per platform, and that binary may hold several
-//! plugin descriptors.  The OS shares one copy of a library between every
-//! `dlopen`/`LoadLibrary` of it, and a binary expects its global state to be
-//! set up once, so every instance of one binary shares a single [`Lv2Module`]
-//! through the [`ModuleRegistry`], keyed by the canonical path.  Nothing else
-//! opens a binary: the scan (`scan`) reads the Turtle only.
+//! `lv2_lib_descriptor` is tried first, as in lilv, and its failure is a
+//! load error; `lv2_descriptor` is the fallback.  The library descriptor gets
+//! an empty feature array (features belong to one instance) and its
+//! `cleanup` runs when the module drops, before the library unloads, under
+//! the entry lock.
 //!
-//! A library exports `lv2_lib_descriptor`, `lv2_descriptor` or both.  As in
-//! lilv, `lv2_lib_descriptor(bundle_path, features)` is tried first and its
-//! failure is a load error; `lv2_descriptor` is the fallback.  The library
-//! descriptor gets an empty feature array, since the host's features belong
-//! to one instance and the library outlives it, and its `cleanup` runs when
-//! the module drops, before the library unloads.  The last [`ModuleHandle`]
-//! runs that `cleanup` and unloads the library under the module's own entry
-//! lock, after the instances that used it are gone.
-//!
-//! The registry map's lock only guards the lookup and the insert, so a slow
-//! load of one binary never blocks a load of another.  Entries are never
-//! removed: the entry outlives its module, so a waiter always waits in the
-//! entry the loader or the last release is using, and one binary is never
-//! opened twice at once.  One `PathBuf` and one mutex per binary ever loaded
-//! is the accepted cost.  Both locks are taken only where a module is loaded
-//! or released, which in the app is the UI thread: the audio callback never
-//! drops the last reference to a plugin, because the chain runtime hands
-//! every slot it lets go of back to the UI.
-//!
-//! [`native_binary`] turns a plugin's `lv2:binary` into the path of the
-//! binary this build can open.  A bundle may list several (one per
-//! platform); the first one under the bundle that exists with this
-//! platform's extension wins.
+//! The map lock only covers lookup and insert.  Entries are never removed,
+//! so a waiter always waits in the entry the loader or the last release is
+//! using, and one binary is never opened twice at once.  Both locks are
+//! taken only on the UI thread: the audio callback never drops the last
+//! reference, because the chain hands a released slot back to the UI.
 
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
@@ -45,40 +28,35 @@ use lv2_sys::{
 use super::scan::PLATFORM_BINARY_EXTENSION;
 use super::ttl::{self, TtlStore};
 
-/// The descriptor function a library exports.
 type DescriptorFunction = unsafe extern "C" fn(u32) -> *const LV2_Descriptor;
 
-/// The library descriptor function a library may export instead.
 type LibDescriptorFunction = unsafe extern "C" fn(
     *const std::ffi::c_char,
     *const *const LV2_Feature,
 ) -> *const LV2_Lib_Descriptor;
 
-/// Where a module's plugin descriptors come from.
 #[derive(Clone, Copy)]
 pub(super) enum Descriptors {
-    /// `lv2_lib_descriptor`'s result, cleaned up when the module drops.
+    /// `lv2_lib_descriptor`.  `cleanup` runs when the module drops.
     Library(*const LV2_Lib_Descriptor),
     /// `lv2_descriptor`.
     Function(DescriptorFunction),
 }
 
-/// How many descriptors one binary may declare.  The spec says to call
-/// `lv2_descriptor` with increasing indices until it returns null; the cap
-/// only keeps a broken library from spinning the host forever.
+/// Caps the `lv2_descriptor` index walk.  A broken library must not spin
+/// the host forever.
 const MAX_DESCRIPTORS: u32 = 4096;
 
-/// The `lv2:binary` predicate of a plugin.
 const LV2_BINARY: &str = "http://lv2plug.in/ns/lv2core#binary";
 
-/// One loaded LV2 library.  Every instance created from it shares the
-/// `libloading::Library` through the registry, so it stays mapped until the
-/// last handle is gone.
+/// Shared by every instance of one binary, so the library stays mapped
+/// until the last handle is gone.
 pub(super) struct Lv2Module {
-    /// Resolved when the library opened.  A library with neither function,
-    /// or whose `lv2_lib_descriptor` fails, is a load error.
+    /// A library with neither export, or a failed `lv2_lib_descriptor`, is a
+    /// load error.
     descriptors: Descriptors,
-    /// What `lv2_lib_descriptor` was given; the library may keep both.
+    /// What `lv2_lib_descriptor` was given.  The library may keep the path
+    /// and the feature array.
     _bundle_path: CString,
     _features: Box<[*const LV2_Feature; 1]>,
     /// Last, so it unloads after `Drop` ran the library's `cleanup`.  `None`
@@ -89,9 +67,10 @@ pub(super) struct Lv2Module {
 // SAFETY: the descriptor function, the library descriptor and every
 // descriptor they return are immutable data inside the library, which the
 // module keeps loaded until after every handle is dropped.  The feature
-// array is the module's own and only holds its null terminator.  The functions behind them follow LV2's
-// thread rules, which the two halves of an instance enforce; the module
-// itself only hands out pointers and is not called concurrently.
+// array is the module's own and only holds its null terminator.  The
+// functions follow LV2's thread rules, which the two halves of an instance
+// enforce; the module itself only hands out pointers and is not called
+// concurrently.
 unsafe impl Send for Lv2Module {}
 unsafe impl Sync for Lv2Module {}
 
@@ -110,7 +89,6 @@ impl Drop for Lv2Module {
 }
 
 impl Lv2Module {
-    /// The descriptor at `index`, or null past the last one.
     pub(super) fn descriptor(&self, index: u32) -> *const LV2_Descriptor {
         match self.descriptors {
             // SAFETY: the library descriptor and its `get_plugin` live in the
@@ -127,7 +105,6 @@ impl Lv2Module {
         }
     }
 
-    /// A module over `descriptors` with no library behind it, for the tests.
     #[cfg(test)]
     pub(super) fn for_test(descriptors: Descriptors) -> Self {
         Self {
@@ -138,7 +115,6 @@ impl Lv2Module {
         }
     }
 
-    /// The descriptor whose `URI` is `uri`, by iterating until null.
     pub(super) fn descriptor_for_uri(&self, uri: &str) -> Option<*const LV2_Descriptor> {
         for index in 0..MAX_DESCRIPTORS {
             let descriptor = self.descriptor(index);
@@ -160,36 +136,26 @@ impl Lv2Module {
     }
 }
 
-/// The process-wide table of module entries, keyed by the canonical path of
-/// the binary.  The map's lock only guards the lookup and the insert; each
-/// path has its own entry, whose lock is held across that module's load and
-/// across its cleanup and unload, so a slow load of one module never blocks a
-/// load of another.
-///
-/// An entry is never removed.  It outlives the module it opened, so a waiter
-/// always waits in the entry the loader or the last release is using: one
-/// binary is never opened twice at once, and no unload races a load of it.
+/// Keyed by canonical path.  The map lock only covers lookup and insert;
+/// each entry's lock covers that module's load, cleanup and unload.  An
+/// entry is never removed, so one binary is never opened twice at once and
+/// no unload races a load.
 pub(super) struct ModuleRegistry {
     modules: Mutex<BTreeMap<PathBuf, Arc<ModuleEntry>>>,
 }
 
-/// One canonical binary path's share of the registry: its loaded module and
-/// how many handles hold it.  The lock is held across that module's load and
-/// across its cleanup and unload, so those never overlap.
+/// The lock is held across this path's load, cleanup and unload.
 struct ModuleEntry {
     state: Mutex<EntryState>,
 }
 
-/// What one [`ModuleEntry`] holds.  `module` stays `None` after a failed
-/// `open`, so the empty entry is reused and the next acquire retries in
-/// place.
+/// `module` stays `None` after a failed `open`, so the next acquire retries
+/// in place.
 struct EntryState {
     module: Option<Arc<Lv2Module>>,
-    /// The live [`ModuleHandle`]s for `module`.
     users: usize,
 }
 
-/// The registry every load goes through.
 static MODULES: ModuleRegistry = ModuleRegistry::new();
 
 impl ModuleEntry {
@@ -213,7 +179,6 @@ impl ModuleRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The entry for `key`, inserting an empty one when the table has none.
     /// The map's lock is released before the entry's is taken.
     fn entry(&self, key: &Path) -> Arc<ModuleEntry> {
         let mut modules = self.lock();
@@ -227,9 +192,7 @@ impl ModuleRegistry {
         }))
     }
 
-    /// Hands out the module stored under `key`, opening it with `open` first
-    /// when it is not loaded.  A module whose `open` fails is not stored, so
-    /// the next acquire tries again in place.
+    /// A failed `open` is not stored, so the next acquire retries in place.
     pub(super) fn acquire(
         &self,
         key: PathBuf,
@@ -254,12 +217,11 @@ impl ModuleRegistry {
     }
 }
 
-/// One user's share of an [`Lv2Module`].  Handles are never cloned; each one
-/// comes from [`acquire_module`].  Dropping the last one runs the library's
-/// `cleanup` and unloads it, under that module's entry lock.
+/// Handles are never cloned.  Dropping the last one runs `cleanup` and
+/// unloads, under the entry lock.
 pub(super) struct ModuleHandle {
     entry: Arc<ModuleEntry>,
-    /// Always `Some` until `drop`.
+    /// `Some` until `drop`.
     module: Option<Arc<Lv2Module>>,
 }
 
@@ -279,11 +241,9 @@ impl Drop for ModuleHandle {
         let mut state = self.entry.lock();
         state.users -= 1;
         if state.users == 0 {
-            // This handle and the entry's `Option` are the only references
-            // left, so this handle holds the last one.  The entry's share goes
-            // first and the drop below then runs the library's `cleanup` and
-            // the unload here, under the entry lock the next acquire of it
-            // needs.
+            // This handle and the entry's `Option` are the last two
+            // references.  Clearing the entry first drops the library here,
+            // under the lock the next acquire needs.
             debug_assert_eq!(Arc::strong_count(&module), 2);
             state.module = None;
         }
@@ -292,17 +252,15 @@ impl Drop for ModuleHandle {
     }
 }
 
-/// The registry key for an LV2 binary: its canonical path, so different
-/// spellings of one file share one module.  When the path cannot be
-/// canonicalised, the absolute path is used instead.
+/// Canonical path, so spellings of one file share a module.  Absolute when
+/// canonicalise fails.
 fn module_key(binary: &Path) -> PathBuf {
     std::fs::canonicalize(binary)
         .or_else(|_| std::path::absolute(binary))
         .unwrap_or_else(|_| binary.to_path_buf())
 }
 
-/// Opens an LV2 library and resolves its descriptors.  `bundle_path` ends in
-/// a separator, as `lv2_lib_descriptor` expects.
+/// `bundle_path` ends in a separator, as `lv2_lib_descriptor` expects.
 fn open_module(binary: &Path, bundle_path: &str) -> Result<Lv2Module, String> {
     let bundle_path = CString::new(bundle_path)
         .map_err(|_| "The LV2 bundle path contains a NUL byte.".to_owned())?;
@@ -325,8 +283,8 @@ fn open_module(binary: &Path, bundle_path: &str) -> Result<Lv2Module, String> {
     })
 }
 
-/// Picks the descriptors a library offers: `lv2_lib_descriptor` first, as
-/// lilv does, and a null result from it is an error, not a fallback.
+/// `lv2_lib_descriptor` first, as lilv does.  A null from it is an error,
+/// not a fallback.
 pub(super) fn resolve(
     lib_function: Option<LibDescriptorFunction>,
     function: Option<DescriptorFunction>,
@@ -347,16 +305,13 @@ pub(super) fn resolve(
         .ok_or_else(|| "The LV2 binary exports no lv2_descriptor.".to_owned())
 }
 
-/// The shared module for a platform binary, loading it if no one else uses
-/// it.  `bundle_path` is the bundle folder with a trailing separator.
+/// `bundle_path` is the bundle folder with a trailing separator.
 pub(super) fn acquire_module(binary: &Path, bundle_path: &str) -> Result<ModuleHandle, String> {
     MODULES.acquire(module_key(binary), || open_module(binary, bundle_path))
 }
 
-/// The plugin's binary for this platform, from the parsed bundle.  Every
-/// `lv2:binary` is considered: the path must stay inside the bundle, exist,
-/// and carry this platform's extension.  The first match wins, so a bundle
-/// that names a foreign binary first still resolves.
+/// The first `lv2:binary` inside the bundle that exists with this
+/// platform's extension.  A foreign binary named first is skipped.
 pub(super) fn native_binary(
     store: &TtlStore,
     plugin: &str,

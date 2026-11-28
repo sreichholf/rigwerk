@@ -1,7 +1,5 @@
-//! The path dot (`docs/ui-spec.md` §4.3 and the *Plays* marks in §3.3).
-//!
-//! Filled, the path is present or playing.  A ring is the same path with
-//! nothing playing.  The colour is the saved path index.
+//! The path dot.  Filled, the path is playing; a ring is the same path
+//! with nothing playing.
 
 use eframe::egui;
 use egui::{Sense, Stroke, Vec2};
@@ -9,8 +7,6 @@ use egui::{Sense, Stroke, Vec2};
 use crate::ui::theme::palette;
 use crate::ui::widgets::row_info;
 
-/// An 8 pt dot in the path colour.  `label` is the AccessKit name, for
-/// example the path name or "Room plays".
 pub(crate) fn path_dot(
     ui: &mut egui::Ui,
     colour_index: u8,

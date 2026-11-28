@@ -1,13 +1,9 @@
-//! Rate conversion between the input clock and an output that runs at
-//! another rate.
-//!
-//! The filter table is built by [`FrameResampler::plan`] on a calling thread
-//! that is not a callback, and installed by [`FrameResampler::adopt`], which
-//! only swaps buffers and never allocates.  A [`KernelHandoff`]
-//! carries a planned table from the rate publishers to a running mixer: the
-//! callback takes it with `try_lock`, never builds or frees one, and returns
-//! the rows it replaced for the poster to drop off the audio thread.  While a
-//! new table is not ready the mixer keeps the old pair and keeps playing.
+//! [`FrameResampler::plan`] builds the table off the callback.
+//! [`FrameResampler::adopt`] only swaps buffers.  A [`KernelHandoff`]
+//! carries one to a running mixer: the callback `try_lock`s, never
+//! builds or frees a table, and returns the rows it replaced for the
+//! poster to drop.  Until a new table is ready the mixer keeps playing
+//! the old pair.
 
 use std::f64::consts::PI;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,11 +12,8 @@ use std::sync::Mutex;
 /// Phase resolution of the precomputed kernel.  The two nearest phases are
 /// blended, which keeps the interpolation error near -90 dB.
 const PHASES: usize = 512;
-/// Fewest and most taps a kernel may have.  The count depends on the rate
-/// pair (see [`kernel_taps`]).
 const MIN_TAPS: usize = 32;
 const MAX_TAPS: usize = 512;
-/// Stop-band attenuation of the Kaiser design, in dB.
 const STOPBAND_DB: f64 = 80.0;
 /// The highest frequency kept flat, in Hz, unless the lower rate's Nyquist
 /// is below it.
@@ -35,15 +28,10 @@ const PREALLOCATED_SOURCE_RATE: u32 = 192_000;
 /// a compile-time assertion there checks.
 pub(crate) const MAX_CORRECTION_PPM: f32 = 500.0;
 
-/// The kernel length for a rate pair.
-///
-/// The passband runs flat to 20 kHz (or 45% of the lower rate).  The stop band
-/// starts where content would fold back onto the passband edge, `lower rate -
-/// passband`, so everything that could alias into the audible band is down by
-/// [`STOPBAND_DB`]; only content that folds into the inaudible range between
-/// the passband and the output Nyquist is left partially attenuated.  The
-/// transition width is measured in source samples, so downsampling from a
-/// high rate needs a proportionally longer kernel.
+/// Passband to 20 kHz, or 45% of the lower rate.  The stop starts at
+/// `lower rate - passband`, so anything that would alias into the
+/// audible band is down by [`STOPBAND_DB`].  The transition is in
+/// source samples, so a high-rate downsample needs a longer kernel.
 fn kernel_taps(source_rate: u32, output_rate: u32) -> usize {
     let (pass, stop) = band_edges(source_rate, output_rate);
     let transition = ((stop - pass) / source_rate as f64).max(1e-6);
@@ -123,25 +111,14 @@ pub(crate) struct Kernel {
     rows: Vec<f32>,
 }
 
-/// Frame-rate conversion between the capture clock and a playback device
-/// that runs at another rate.
+/// Kaiser-windowed sinc, so downsampling filters before it decimates.
+/// 512 phases, the two nearest blended.  History is sized for any source
+/// up to 192 kHz, so [`Self::adopt`] and `next` do not allocate there.
+/// [`Self::plan`] may allocate because it runs off the callback.  A 1:1
+/// pair is the caller's bypass unless drift steering is on.
 ///
-/// A precomputed Kaiser-windowed sinc kernel band-limits the source to the
-/// lower of the two rates, so downsampling filters before it decimates
-/// instead of folding content above the output Nyquist back into the audible
-/// band.  The kernel is evaluated at the fractional read position through 512
-/// phases, each row normalized to unity gain at DC, and the two nearest phases
-/// are blended so a slowly changing ratio does not step between them.  The
-/// history storage is sized for any source up to 192 kHz when the resampler
-/// is created, so [`Self::adopt`] and `next` never allocate for such a rate.
-/// The table itself is built by [`Self::plan`], which may allocate because it
-/// runs off the callback; [`Self::configure`] is the non-realtime build and
-/// install used by the setup threads.  The nominal 1:1 case is left to the
-/// caller's bypass unless a drift correction is applied.
-///
-/// The frame type is the stereo pair by default; a generic extra output runs one
-/// over its device lanes (`[f32; N]`, only the first [`Self::set_lanes`]
-/// lanes computed).
+/// The default frame is a stereo pair.  An extra output uses `[f32; N]`
+/// and computes the first [`Self::set_lanes`] lanes.
 pub(crate) struct FrameResampler<F: ResampleFrame = (f32, f32)> {
     /// The rate pair the current table was designed for.
     source_rate: u32,
@@ -176,11 +153,9 @@ pub(crate) struct FrameResampler<F: ResampleFrame = (f32, f32)> {
 
 impl<F: ResampleFrame> FrameResampler<F> {
     pub(crate) fn new(source_rate: u32, output_rate: u32) -> Self {
-        // Reserve kernel rows for the longest table any source up to 192 kHz
-        // needs at this output rate (downsampling from the fastest source is
-        // the worst case), so later rate changes stay inside this storage.
-        // The history is only ever `history_len(taps)` and `taps` is capped
-        // at `MAX_TAPS`, so its reservation covers a source above 192 kHz too.
+        // Rows for the longest table a source up to 192 kHz needs here,
+        // so a later rate change stays inside this storage.  History is
+        // capped at `MAX_TAPS`, so a faster source fits that reservation.
         let output_rate = output_rate.max(1);
         let most_taps = kernel_taps(PREALLOCATED_SOURCE_RATE, output_rate)
             .max(kernel_taps(source_rate.max(1), output_rate));
@@ -279,7 +254,6 @@ impl<F: ResampleFrame> FrameResampler<F> {
         let _retired = self.adopt(kernel);
     }
 
-    /// For tests: how many kernels this resampler built.
     #[cfg(test)]
     pub(crate) fn configure_calls(&self) -> usize {
         self.configure_calls
@@ -408,14 +382,11 @@ pub(crate) struct KernelSlot {
     retired: Option<Vec<f32>>,
 }
 
-/// A one-slot kernel handoff between a rate publisher and one mixer.
-///
-/// [`Self::post`] runs off the audio thread.  It replaces a stale pending
-/// table and drops the retired rows, so the callback never frees a table.
-/// [`Self::try_adopt`] runs on the callback: it only `try_lock`s, keeps the
-/// current table when the lock is busy, and leaves a pending table for the
-/// current pair in place rather than restarting the history it is playing.
-/// `ready` makes the usual block a single relaxed load.
+/// [`Self::post`] runs off the audio thread and drops retired rows, so
+/// the callback never frees a table.  [`Self::try_adopt`] only
+/// `try_lock`s, keeps the current table when the lock is busy, and
+/// leaves a table for the pair already playing rather than resetting
+/// its history.  `ready` makes the usual block one relaxed load.
 pub(crate) struct KernelHandoff {
     slot: Mutex<KernelSlot>,
     ready: AtomicBool,
@@ -462,11 +433,9 @@ impl KernelHandoff {
         let usable =
             kernel.output_rate == current.1 && (kernel.source_rate, kernel.output_rate) != current;
         if !usable {
-            // Either it is already what plays (adopting it would reset the
-            // history and restart the right pair) or it is planned for another
-            // output rate, which would leave the mixer's own device rate
-            // behind.  Park it where the poster drops it, so the block costs
-            // one relaxed load again instead of a lock until the next post.
+            // Already playing (adopting would reset its history) or planned
+            // for another output rate.  Park it for the poster, so the
+            // block is one relaxed load again until the next post.
             if slot.retired.is_none() {
                 slot.retired = slot.pending.take().map(|kernel| kernel.rows);
             }
@@ -494,7 +463,6 @@ impl KernelHandoff {
         self.ready.store(false, Ordering::Relaxed);
     }
 
-    /// The pending table's rate pair, for tests.
     #[cfg(test)]
     pub(crate) fn pending_pair(&self) -> Option<(u32, u32)> {
         self.slot.lock().ok().and_then(|slot| {
@@ -504,7 +472,6 @@ impl KernelHandoff {
         })
     }
 
-    /// Whether a block would look at the slot, for tests.
     #[cfg(test)]
     pub(crate) fn ready_for_test(&self) -> bool {
         self.ready.load(Ordering::Relaxed)
@@ -523,7 +490,6 @@ impl KernelHandoff {
         pending
     }
 
-    /// The retired rows' length, for tests.
     #[cfg(test)]
     pub(crate) fn retired_len(&self) -> Option<usize> {
         self.slot

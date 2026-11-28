@@ -1,48 +1,25 @@
-//! The latency budget: every part of the path that is known, where its
-//! number comes from, and the last measured loopback.
-//!
-//! Everything here is read from the live snapshot and the app's own settings;
-//! nothing is invented.  A part is `Reported` (the driver, the graph or a
-//! plugin says so), `Setting` (RigWerk's own bridge buffer), `Derived` (added and
-//! converted here with the buffer and rate the bridge really runs at) or
-//! `Measured` (the loopback calibration played a click and heard it come
-//! back).  The estimate is the sum of the reported and setting parts; it is
-//! not a loopback, and every label on screen and in the diagnostics text says
-//! so.
-//!
-//! The measured loopback and the estimate cover different legs of the path:
-//! the measurement starts at the output callback and ends at the input
-//! callback, while the estimate adds the input block, bridge buffer, chain, output
-//! step and after-node delay.  They are shown side by side with that
-//! difference stated, never subtracted from each other.
-//!
-//! The stored measurement is deliberately tied to the conditions it was made
-//! under (see `app::latency`): a different input, output, rate, buffer/step or
-//! output mode marks it stale instead of silently reusing a number that no
-//! longer describes this rig.
+//! The estimate sums the reported and setting parts.  It is not a
+//! loopback, and it is never subtracted from the measurement: they cover
+//! different legs.  A different input, output, rate, buffer or output
+//! mode marks the stored measurement stale.
 
 use crate::app::bridge::LatencyParts;
 use crate::app::latency::MeasuredLatency;
 use crate::app::settings::rate_label;
 use crate::app::RigWerkApp;
 
-/// How the measured leg and the estimated path differ, in one sentence for
-/// the Diagnostics card, the panel and the copied text.
+/// One sentence, shared by the Diagnostics card, the panel and the copied text.
 pub(crate) const LEGS_NOTE: &str = "The measured loopback runs from the output callback through the converters, the cable or microphone and back to the input callback. The estimated path adds the input block, bridge buffer, selected chain, output step and any graph delay after RigWerk's node, and leaves out the converters and alignment trims. They cover different legs, so the measurement is not an error on the estimate.";
 
-/// Where one budget number comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LatencySource {
-    /// Played a click and heard it come back.
     Measured,
-    /// The driver, the graph or a plugin reported it.
     Reported,
     /// RigWerk's own buffer choice, not a hardware reading.
     Setting,
-    /// The size asked for while the bridge is stopped, or before the driver
-    /// or graph has reported the block it opened and the rate it runs at.
+    /// Asked for while the bridge is stopped, or before the driver or
+    /// graph has reported the block it opened.
     Planned,
-    /// Added or converted here from reported parts.
     Derived,
 }
 
@@ -58,7 +35,6 @@ impl LatencySource {
     }
 }
 
-/// One line of the budget.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct BudgetPart {
     pub(crate) label: &'static str,
@@ -76,26 +52,20 @@ impl BudgetPart {
     }
 }
 
-/// The whole breakdown, as the Diagnostics page, the Live card and the
-/// diagnostics text draw it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct LatencyBudget {
     pub(crate) parts: Vec<BudgetPart>,
-    /// The sum of the parts that have a number.  Not a loopback.  Parts
-    /// without one are named in [`Self::estimate_gap`] and left out.
+    /// Not a loopback.  Parts without a number are named in
+    /// [`Self::estimate_gap`] and left out.
     pub(crate) estimate_ms: f32,
-    /// Why the sum is short of the labelled path, when a part has no number.
+    /// Set when a part has no number.
     pub(crate) estimate_gap: Option<String>,
-    /// The stored measurement, if any.
     pub(crate) measured: Option<MeasuredLatency>,
-    /// Why the stored measurement no longer applies.
     pub(crate) stale: Option<String>,
 }
 
 impl LatencyBudget {
-    /// One line per part, the estimate and the measurement, for Copy and
-    /// Export.  The words "estimate" and "measured" are not interchangeable
-    /// here on purpose.
+    /// "Estimate" and "measured" are not interchangeable here.
     pub(crate) fn text_lines(&self) -> Vec<String> {
         let mut lines = vec!["Latency budget:".to_owned()];
         for part in &self.parts {
@@ -132,7 +102,6 @@ impl LatencyBudget {
 }
 
 impl RigWerkApp {
-    /// The breakdown Diagnostics and Copy/Export show.
     pub(crate) fn latency_budget(&self) -> LatencyBudget {
         let parts_of_bridge = self.latency_parts();
         let mut parts = Vec::new();
@@ -211,10 +180,8 @@ impl RigWerkApp {
         }
     }
 
-    /// The latency of the clock output: the slowest audible path routed
-    /// there, plus that output's alignment.  Setup and the title bar read
-    /// this.  [`Self::latency_budget`] stays the selected path, for the
-    /// diagnostics text.
+    /// The slowest audible path on the clock output, plus alignment.
+    /// [`Self::latency_budget`] stays the selected path.
     pub(crate) fn heard_estimate(&self) -> HeardEstimate {
         let parts_of_bridge = self.latency_parts();
         let input = frames_ms(parts_of_bridge.input_block, parts_of_bridge.input_rate);
@@ -286,7 +253,6 @@ impl RigWerkApp {
         }
     }
 
-    /// Title-bar hover: each path on the clock output, then the measurement.
     pub(crate) fn heard_summary(&self) -> String {
         let mut lines = Vec::new();
         for info in self.path_infos() {
@@ -306,20 +272,17 @@ impl RigWerkApp {
     }
 }
 
-/// One part of [`HeardEstimate`].
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct HeardPart {
     pub(crate) label: &'static str,
     pub(crate) ms: Option<f32>,
 }
 
-/// The clock-output estimate Setup draws as a number and a stacked bar.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct HeardEstimate {
     pub(crate) parts: Vec<HeardPart>,
     pub(crate) total_ms: f32,
-    /// The path whose chain and alignment are in the sum.  None when no
-    /// audible path is routed to the clock output.
+    /// `None` when no audible path is routed to the clock output.
     pub(crate) path: Option<String>,
 }
 

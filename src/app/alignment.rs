@@ -1,21 +1,6 @@
-//! The latency alignment per output device, as the UI reads and sets it.
-//!
-//! The engine lines the paths up on each device (see `audio::output_map`,
-//! "Alignment"); this is the app side: the per-device align switch, and
-//! what the alignment does on a device in ms, for the Signal Routing page
-//! (latency line, alignment delay per path, latency bars), the Live
-//! summary (the added latency on the Output chip) and Live Issues.
-//!
-//! Alignment lines up the paths on one device.  It does not line devices
-//! up with each other: an extra output's bridge buffer and every device's own buffer
-//! still differ.
-//!
-//! Warnings: two paths that sound on one channel of a device and arrive on
-//! different frames comb filter ([`RoutingWarningKind::Sum`], red).  With
-//! the device's align switch on that only happens when trims pull them
-//! apart; with it off, whenever their chain latency plus trim differ.  On
-//! an unaligned device two such paths on different channels shift the
-//! image ([`RoutingWarningKind::Shift`], amber).
+//! Alignment lines paths up on one device.  It does not line devices up
+//! with each other: an extra output's bridge buffer and each device's
+//! own buffer still differ.
 
 use crate::app::RigWerkApp;
 use crate::audio::{AlignmentReport, MAX_PATHS};
@@ -32,36 +17,26 @@ pub(crate) fn channel_list(channels: &[usize]) -> String {
 /// What the alignment does on one output device.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct DeviceAlignment {
-    /// The device's align switch.
     pub(crate) align: bool,
-    /// The path slot this device waits for: the slowest path it plays,
-    /// when align is on and some other path it plays is faster.
+    /// The slowest path it plays, when align is on and another is faster.
     pub(crate) waits_for: Option<usize>,
-    /// The device's latency from the chains and the alignment: the slowest
-    /// path it plays, including its trim, ms.
+    /// The slowest path it plays, including its trim.
     pub(crate) total_ms: f32,
-    /// The largest alignment delay on the device (what aligning and the
-    /// trims add on top of a path's own chain), ms.
+    /// The largest delay aligning and the trims add beyond a path's chain.
     pub(crate) added_ms: f32,
-    /// Per path slot: the alignment delay the path gets here, ms; `None`
-    /// when the device does not play it.
+    /// `None` when the device does not play the path.
     pub(crate) per_path: [Option<f32>; MAX_PATHS],
-    /// Per path slot: its chain latency plus its delay here (when the
-    /// person hears it on this device), ms; `None` when not played.
+    /// Chain latency plus the delay here.  `None` when not played.
     pub(crate) arrival_ms: [Option<f32>; MAX_PATHS],
-    /// The same in frames, for exact comparisons (one frame at 192 kHz is
-    /// about 5 µs).
+    /// Exact comparisons: one frame at 192 kHz is about 5 µs.
     pub(crate) arrival_frames: [Option<u32>; MAX_PATHS],
-    /// Some path played here has more chain latency than the alignment
-    /// covers (see `AlignmentReport::clamped`).
+    /// A path's chain is longer than the alignment covers.
     pub(crate) clamped: bool,
-    /// Read from the running mixer (`true`) or worked out from the
-    /// settings because no bridge runs (`false`).
+    /// From the running mixer.  False when worked out from the settings.
     pub(crate) live: bool,
 }
 
 impl DeviceAlignment {
-    /// How many paths the device plays.
     pub(crate) fn path_count(&self) -> usize {
         self.per_path.iter().flatten().count()
     }
@@ -86,12 +61,9 @@ impl DeviceAlignment {
 }
 
 impl RigWerkApp {
-    /// What the alignment does on output device `device` (0 = clock
-    /// output, then extra outputs).  From the running mixer when it has
-    /// published one with the same switch (the engine only reports while a
-    /// bridge runs and the device is fed), else worked out from the
-    /// settings, the paths' chain latency and the plugin chains' rate.
-    /// `None` for a device that does not exist.
+    /// From the running mixer when its switch matches; otherwise from the
+    /// settings.  The engine reports only while a bridge runs and the
+    /// device is fed.
     pub(crate) fn device_alignment(&self, device: usize) -> Option<DeviceAlignment> {
         let settings = *self.device_settings().get(device).copied()?;
         if let Some(report) = self.engine.device_alignment(device) {
@@ -108,16 +80,13 @@ impl RigWerkApp {
         Some(DeviceAlignment::from_report(&report, false))
     }
 
-    /// Output device `device`'s align switch.
     pub(crate) fn device_align(&self, device: usize) -> bool {
         self.device_settings()
             .get(device)
             .is_some_and(|settings| settings.align)
     }
 
-    /// Turns latency alignment on output device `device` on or off.  Takes
-    /// effect with the next push to the engine (every frame), with the
-    /// delays crossfading.
+    /// The next push crossfades the delays.
     pub(crate) fn set_device_align(&mut self, device: usize, align: bool) {
         if let Some(settings) = self.device_settings_mut().nth(device) {
             settings.align = align;
@@ -128,32 +97,24 @@ impl RigWerkApp {
 /// Why the Signal Routing page warns about one device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RoutingWarningKind {
-    /// Unaligned paths add up on a channel: comb filter (red).
+    /// Paths add on one channel and comb-filter.
     Sum,
-    /// Unaligned paths play on different channels of one device: the image
-    /// shifts (amber).
+    /// Paths on different channels shift the image.
     Shift,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RoutingWarning {
     pub(crate) kind: RoutingWarningKind,
-    /// The path slots involved, in display order.
+    /// Display order.
     pub(crate) paths: Vec<usize>,
-    /// The device channels (0-based) involved: those carrying several paths
-    /// for [`RoutingWarningKind::Sum`], every playing one for `Shift`.
+    /// `Sum`: channels carrying several paths.  `Shift`: every playing one.
     pub(crate) channels: Vec<usize>,
 }
 
 impl RigWerkApp {
-    /// What the Signal Routing page should warn about on output device
-    /// `device` (0 = clock output, then extra outputs).  Every live path counts,
-    /// muted or not: the routing decides, as for alignment.  Only paths
-    /// that arrive on different frames (chain latency, alignment and trim)
-    /// warn: `Sum` when they add up on one channel (also on an aligned
-    /// device, when trims pull them apart), `Shift` when an unaligned
-    /// device plays them on different channels.  At most one warning:
-    /// `Sum` wins over `Shift`.
+    /// Every live path counts, muted or not.  `Sum` also fires on an
+    /// aligned device when trims pull paths apart, and it wins over `Shift`.
     pub(crate) fn routing_warnings(&self, device: usize) -> Vec<RoutingWarning> {
         let Some(settings) = self.device_settings().get(device).copied() else {
             return Vec::new();

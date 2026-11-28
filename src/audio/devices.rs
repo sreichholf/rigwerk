@@ -1,4 +1,8 @@
-//! Device discovery and choosing a stream configuration for a device.
+//! Asking ALSA for a configuration opens a PCM.  A scan while the bridge
+//! holds the device must not, or a busy device looks unplugged.
+//!
+//! The ALSA and native PipeWire id grammar lives here: this file is the
+//! copy that compiles on every platform.
 
 use cpal::traits::{DeviceTrait, HostTrait};
 
@@ -12,7 +16,7 @@ pub fn scan_devices() -> Inventory {
     scan_devices_from(&Inventory::default(), true)
 }
 
-/// Preview rows only — enough to paint the shell before the first real scan.
+/// Preview rows, enough to paint the shell before the first real scan.
 pub(crate) fn placeholder_inventory() -> Inventory {
     let mut inventory = Inventory {
         os: std::env::consts::OS.to_owned(),
@@ -29,21 +33,18 @@ pub(crate) fn placeholder_inventory() -> Inventory {
     inventory
 }
 
-/// Like [`scan_devices`], but a device whose configuration cannot be read is
-/// kept when `previous` already listed it.
+/// A device whose configuration cannot be read is kept when `previous`
+/// already listed it.
 ///
-/// `probe_configs` is false while a bridge is opening or running. Enumerating
-/// names does not open a PCM. Asking ALSA for a configuration does, and that
-/// open fails on a device the bridge already holds, which used to look like
-/// an unplug.
+/// `probe_configs` is false while a bridge is opening or running.
+/// Enumerating names does not open a PCM.  Asking ALSA for a configuration
+/// does, and that open fails on a device the bridge already holds.
 pub(crate) fn scan_devices_from(previous: &Inventory, probe_configs: bool) -> Inventory {
     if !probe_configs {
         return presence_from(previous);
     }
     let mut inventory = Inventory {
-        // ASIO capture on Windows; JACK or direct ALSA capture on Linux.
-        // Playback always comes from a normal system host, never the
-        // low-latency driver.
+        // Playback is never the low-latency driver.
         os: std::env::consts::OS.to_owned(),
         low_latency_label: if cfg!(target_os = "windows") {
             "ASIO".to_owned()
@@ -73,9 +74,8 @@ pub(crate) fn scan_devices_from(previous: &Inventory, probe_configs: bool) -> In
                         preferred: false,
                         asio_clsid: Some(clsid),
                     });
-                    // The same driver is also a playback device.  Keeping it in
-                    // the output list means the protocol no longer decides which
-                    // side of the bridge a device may appear on.
+                    // The same driver is also a playback device, so the protocol
+                    // does not decide which side it appears on.
                     output_candidates.push(DeviceItem {
                         id: format!("asio-out:{clsid:032x}"),
                         name,
@@ -93,9 +93,8 @@ pub(crate) fn scan_devices_from(previous: &Inventory, probe_configs: bool) -> In
 
     let mut input_candidates: Vec<DeviceItem> = Vec::new();
 
-    // The device Windows already uses everywhere else is the right default
-    // here too.  Marking every host's default instead would let an arbitrary
-    // MME or DirectSound device win the "preferred" sort below.
+    // Only the Windows default.  Marking every host's default would let an
+    // arbitrary MME or DirectSound device win the preferred sort.
     let system_host_id = cpal::default_host().id();
 
     for host_id in cpal::available_hosts() {
@@ -139,9 +138,7 @@ pub(crate) fn scan_devices_from(previous: &Inventory, probe_configs: bool) -> In
             #[cfg(not(target_os = "linux"))]
             let device_backend = host_name.to_owned();
 
-            // ALSA publishes sink/source plugins that cannot carry a guitar:
-            // "null" discards everything and "oss" is the legacy emulation.
-            // Leaving them out keeps the first real device as the default.
+            // "null" discards audio and "oss" is the legacy emulation.
             #[cfg(target_os = "linux")]
             if host_name.eq_ignore_ascii_case("ALSA")
                 && id.as_deref().is_some_and(alsa_pcm_is_placeholder)
@@ -202,17 +199,13 @@ pub(crate) fn scan_devices_from(previous: &Inventory, probe_configs: bool) -> In
         }
     }
 
-    // ALSA publishes several plugin names for one card (front, surround,
-    // sysdefault, dmix, …). They share the card's display name, so the menu
-    // shows the same row over and over. When the card already has hw: or
-    // plughw:, those aliases add nothing the person can choose usefully.
+    // When the card already has `hw:` or `plughw:`, the plugin aliases add
+    // nothing the person can choose.
     hide_redundant_alsa_aliases(&mut output_candidates);
     hide_redundant_alsa_aliases(&mut input_candidates);
 
-    // Real PipeWire sources and sinks replace the single ALSA `pipewire`
-    // shim. When the server is down, the shim stays so a device can still
-    // be opened. The preferred row is chosen after that, so a live sink
-    // wins over the shim.
+    // Real nodes replace the `alsa:pipewire` shim.  If the server is down
+    // the shim stays, so a device can still be opened.
     #[cfg(target_os = "linux")]
     merge_native_nodes(
         &mut output_candidates,
@@ -229,11 +222,9 @@ pub(crate) fn scan_devices_from(previous: &Inventory, probe_configs: bool) -> In
     #[cfg(any(target_os = "linux", test))]
     prefer_pipewire(&mut input_candidates);
 
-    // WASAPI is the host that keeps other apps audible in shared mode, which is
-    // exactly what an ASIO input needs on the other side of the bridge.  Rank
-    // it above DirectSound/MME.  Collapse only a repeated endpoint (same id
-    // and backend).  Two backends that share a display name, and two ALSA
-    // aliases of one card, both stay in the list.
+    // WASAPI stays audible for other apps, which is what an ASIO input
+    // needs on the other side.  Dedup is id plus backend, so two hosts and
+    // `hw:`/`plughw:` both stay.
     let host_rank = |backend: &str| {
         if backend.eq_ignore_ascii_case("WASAPI") {
             0
@@ -241,9 +232,7 @@ pub(crate) fn scan_devices_from(previous: &Inventory, probe_configs: bool) -> In
             1
         }
     };
-    // ASIO outputs stay at the end of the list.  They are already a different
-    // id and backend, so the dedup below would keep them either way; the split
-    // is only so the everyday system output remains the first row.
+    // So the everyday system output stays the first row.
     let mut asio_output_candidates = Vec::new();
     output_candidates.retain(|device| {
         if device.backend.eq_ignore_ascii_case("ASIO") {
@@ -262,9 +251,8 @@ pub(crate) fn scan_devices_from(previous: &Inventory, probe_configs: bool) -> In
     dedup_devices(&mut output_candidates);
     asio_output_candidates.sort_by_cached_key(|device| device.name.to_lowercase());
     dedup_devices(&mut asio_output_candidates);
-    // Keep the everyday system outputs first: the common case is an ASIO
-    // input playing through the speakers Windows already uses.  The ASIO
-    // outputs stay available at the end for people who want that path.
+    // The common case is an ASIO input through the speakers Windows already
+    // uses.
     output_candidates.extend(asio_output_candidates);
 
     input_candidates.sort_by(|a, b| {
@@ -274,12 +262,9 @@ pub(crate) fn scan_devices_from(previous: &Inventory, probe_configs: bool) -> In
     });
     dedup_devices(&mut input_candidates);
 
-    // On Linux, PipeWire is the default low-latency backend.  Its inputs and
-    // the default PCM come first; JACK follows when present, then direct ALSA
-    // hardware PCMs (`hw:`/`plughw:`).  Virtual PulseAudio/default inputs stay
-    // on the system side.  On a machine that exposes only virtual ALSA inputs,
-    // fall back to those so the side has something to open instead of showing
-    // only a preview placeholder.
+    // PipeWire, then JACK, then direct ALSA.  Virtual pulse/default stay on
+    // the system side.  A machine with only virtual inputs falls back to
+    // those.
     #[cfg(target_os = "linux")]
     {
         let mut pipewire_inputs = Vec::new();
@@ -329,9 +314,8 @@ pub(crate) fn scan_devices_from(previous: &Inventory, probe_configs: bool) -> In
         .to_owned();
 
         if low_inputs.is_empty() {
-            // Containers and some desktops only publish the "default" plugin;
-            // keep it usable as the low-latency input too.  The system list
-            // still has the same device.
+            // A machine that only publishes "default" still needs a
+            // low-latency input.
             let alsa_inputs: Vec<DeviceItem> = input_candidates
                 .iter()
                 .filter(|device| {
@@ -344,8 +328,8 @@ pub(crate) fn scan_devices_from(previous: &Inventory, probe_configs: bool) -> In
         } else {
             inventory.asio.extend(low_inputs);
         }
-        // The preferred PipeWire entry must stay first even when a JACK or
-        // direct ALSA device also landed on this side.
+        // Preferred PipeWire stays first even when JACK or direct ALSA also
+        // landed here.
         inventory.asio.sort_by(|a, b| {
             b.preferred
                 .cmp(&a.preferred)
@@ -360,7 +344,7 @@ pub(crate) fn scan_devices_from(previous: &Inventory, probe_configs: bool) -> In
     inventory
 }
 
-/// Ids currently published by a host, without opening a stream configuration.
+/// Ids, without opening a stream configuration.
 fn present_ids() -> std::collections::HashSet<String> {
     let mut ids = std::collections::HashSet::new();
     for host_id in cpal::available_hosts() {
@@ -387,9 +371,7 @@ fn present_ids() -> std::collections::HashSet<String> {
     ids
 }
 
-/// A scan that does not open a PCM. Devices still enumerated stay; anything
-/// the kernel no longer lists is dropped. New devices wait for a probing scan,
-/// which is the one that asks for a configuration.
+/// Does not open a PCM.  New devices wait for a probing scan.
 fn presence_from(previous: &Inventory) -> Inventory {
     let ids = present_ids();
     let mut inventory = previous.clone();
@@ -411,9 +393,8 @@ fn still_listed(device: &DeviceItem, ids: &std::collections::HashSet<String>) ->
     if device.demo || device.asio_clsid.is_some() || ids.contains(&device.id) {
         return true;
     }
-    // Native PipeWire ids are not cpal ids. A presence scan keeps them until
-    // the registry round-trip below refreshes the list. A failed round-trip
-    // leaves the previous nodes in place.
+    // Native ids are not cpal ids.  A failed registry round-trip leaves
+    // the previous nodes in place.
     #[cfg(target_os = "linux")]
     if is_native_id(&device.id) {
         return true;
@@ -497,8 +478,7 @@ fn input_side(device: &cpal::Device) -> Side {
     }
 }
 
-/// Drops ALSA plugin aliases of a card that is already listed as `hw:` or
-/// `plughw:`. `default`, `pulse`, and `pipewire` stay: they are not one card.
+/// `default`, `pulse`, and `pipewire` stay: they are not one card.
 fn hide_redundant_alsa_aliases(devices: &mut Vec<DeviceItem>) {
     let direct_cards: std::collections::HashSet<String> = devices
         .iter()
@@ -519,22 +499,18 @@ fn hide_redundant_alsa_aliases(devices: &mut Vec<DeviceItem>) {
     });
 }
 
-/// The PCM part of a cpal ALSA id (`ALSA:hw:CARD=0,DEV=0` -> `hw:CARD=0,DEV=0`).
+/// The only copy of the id grammar.  `linux::alsa` re-exports it.
 ///
-/// This is the only copy of the id grammar; `linux::alsa` re-exports it,
-/// because this file is the copy that compiles on every platform.
+/// cpal prints the host in lower case; other backends use the display
+/// spelling.
 pub(crate) fn alsa_pcm_name(device_id: &str) -> &str {
-    // cpal prints the host in lower case (`alsa:hw:CARD=0,DEV=0`), while other
-    // backends and older versions use the display spelling (`ALSA:...`).
     match device_id.split_once(':') {
         Some((host, pcm)) if host.eq_ignore_ascii_case("alsa") => pcm.trim(),
         _ => device_id.trim(),
     }
 }
 
-/// Whether a cpal ALSA id names a physical PCM rather than a virtual plugin.
-/// `hw:` bypasses every conversion; `plughw:` still goes straight to the card
-/// but lets ALSA convert formats.  Both are the low-latency ALSA side.
+/// `hw:` and `plughw:` are both the low-latency side.
 pub(crate) fn alsa_pcm_is_direct(device_id: &str) -> bool {
     let pcm = alsa_pcm_name(device_id);
     pcm.starts_with("hw:") || pcm.starts_with("plughw:")
@@ -598,11 +574,8 @@ pub(crate) fn device_pcm_tag(device_id: &str) -> Option<String> {
 /// The host prefix a native PipeWire id carries.
 pub(crate) const NATIVE_PREFIX: &str = "pipewire:";
 
-/// The node name in a native PipeWire id (`pipewire:{node.name}`).
-///
-/// This is the only copy of the native-id grammar; `linux::native` re-exports
-/// it, because this file is the copy that compiles on every platform.  The
-/// bare ALSA plugin id `alsa:pipewire` does not match.
+/// The only copy of the native-id grammar.  `linux::native` re-exports it.
+/// The bare `alsa:pipewire` plugin id does not match.
 pub(crate) fn node_name(device_id: &str) -> Option<&str> {
     let name = device_id.strip_prefix(NATIVE_PREFIX)?;
     if name.is_empty() || name.eq_ignore_ascii_case("pipewire") {
@@ -612,13 +585,12 @@ pub(crate) fn node_name(device_id: &str) -> Option<&str> {
     }
 }
 
-/// Whether `device_id` names a real PipeWire source or sink.
 pub(crate) fn is_native_id(device_id: &str) -> bool {
     node_name(device_id).is_some()
 }
 
-/// Menu text for one device. When several rows share a display name and a
-/// backend, the PCM plugin is what makes them different.
+/// When several rows share a name and a backend, the PCM plugin is what
+/// makes them different.
 pub(crate) fn device_choice_label(device: &DeviceItem, peers: &[DeviceItem]) -> String {
     let shared_name = peers.iter().any(|other| {
         other.id != device.id
@@ -740,10 +712,8 @@ fn remembered(devices: &[DeviceItem], id: &str, backend: &str) -> Option<DeviceI
         .cloned()
 }
 
-/// Drops a repeated endpoint. The key is the stable id plus the backend, so
-/// two hosts that share a display name (WASAPI and ASIO) and two ALSA aliases
-/// (`hw:` and `plughw:`) both stay selectable. The first row wins, which is
-/// the preferred one after the inventory has been sorted.
+/// The key is the id plus the backend, so two hosts and `hw:`/`plughw:`
+/// both stay.  The first row wins.
 fn dedup_devices(devices: &mut Vec<DeviceItem>) {
     let mut seen = std::collections::HashSet::new();
     devices.retain(|device| seen.insert((device.id.clone(), device.backend.to_ascii_lowercase())));
@@ -781,11 +751,8 @@ fn low_latency_decision(device: &DeviceItem, in_platform_group: bool) -> bool {
     device.asio_clsid.is_some() || in_platform_group
 }
 
-/// On Linux, PipeWire is the default backend, JACK is the dedicated graph, and
-/// direct ALSA hardware PCMs are the exclusive fallback.  PulseAudio and other
-/// virtual plugins stay on the system side.  The label names the group after
-/// the fact ("ALSA" when no PipeWire or JACK endpoint was found), so it must
-/// not pull pulse, default, or sysdefault onto that side.
+/// The label names the group after the fact, so it must not pull pulse,
+/// default, or sysdefault onto that side.
 #[cfg(target_os = "linux")]
 pub(crate) fn is_low_latency_device(device: &DeviceItem, low_latency_label: &str) -> bool {
     let _ = low_latency_label;
@@ -797,9 +764,8 @@ pub(crate) fn is_low_latency_device(device: &DeviceItem, low_latency_label: &str
     )
 }
 
-/// Off Linux the label names the low-latency group ("ASIO" on Windows) and the
-/// backend is matched against it.  The other system hosts (WASAPI,
-/// DirectSound, MME) stay on the system side.
+/// The backend is matched against the label.  The other system hosts stay
+/// on the system side.
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn is_low_latency_device(device: &DeviceItem, low_latency_label: &str) -> bool {
     low_latency_decision(

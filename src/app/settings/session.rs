@@ -1,5 +1,3 @@
-//! A saved session and helpers that operate on sessions.
-
 use super::path_pref::{default_path_name, sanitize_paths, PathPref};
 use super::preferences::{
     ExtraOutputPref, DEFAULT_BRIDGE_BUFFER_MS, DEFAULT_BUFFER, DEFAULT_INPUT_GAIN,
@@ -8,64 +6,51 @@ use super::preferences::{
 use super::serde_util::{placeholder_unreadable, skip_unreadable};
 use crate::audio::{EqSettings, GateSettings, OutputDeviceSettings, PluginPref, WasapiOutputMode};
 
-/// A saved session.  Every field has a default, so a session saved by an older or
-/// newer version (or with a field missing) still loads.
+/// Every field defaults, so a session from another version still loads.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub(crate) struct Session {
     pub(crate) name: String,
     pub(crate) note: String,
-    /// Display name of the input. Sessions that only stored a name leave
-    /// [`Self::input_id`] and [`Self::input_backend`] empty.
+    /// A name-only save leaves the id and backend empty.
     pub(crate) input: String,
-    /// [`crate::audio::DeviceItem::id`] of the input.
     pub(crate) input_id: String,
-    /// [`crate::audio::DeviceItem::backend`] stored with [`Self::input_id`].
     pub(crate) input_backend: String,
-    /// Display name of the output. Same fallback rule as [`Self::input`].
+    /// A name-only save leaves the id and backend empty.
     pub(crate) output: String,
-    /// [`crate::audio::DeviceItem::id`] of the output.
     pub(crate) output_id: String,
-    /// [`crate::audio::DeviceItem::backend`] stored with [`Self::output_id`].
     pub(crate) output_backend: String,
     pub(crate) rate: u32,
     pub(crate) buffer: usize,
-    /// Output side; 0 in sessions saved before the sides were separate means
-    /// "follow the input".
+    /// 0 means follow the input.
     pub(crate) output_rate: u32,
     pub(crate) output_buffer: usize,
-    /// Path 1's EQs in sessions from before paths existed (pre and post
-    /// effects).  Sessions from before an EQ existed have none and keep the
-    /// current one.  Read, never written (see [`Self::paths`]).
+    /// Path 1 from a session with no `paths`.  None keeps the current EQ.
     #[serde(skip_serializing)]
     pub(crate) eq: Option<EqSettings>,
+    /// Path 1 from a session with no `paths`.  None keeps the current EQ.
     #[serde(skip_serializing)]
     pub(crate) eq_post: Option<EqSettings>,
-    /// Path 1's gate in sessions from before paths.  Older sessions have none
-    /// and keep the current one.
+    /// Path 1 from a session with no `paths`.  None keeps the current gate.
     #[serde(default, skip_serializing)]
     pub(crate) gate: Option<GateSettings>,
-    /// Input fader, dB. Missing on older sessions; the default is 0 dB.
     pub(crate) input_gain: f32,
-    /// Output fader, dB. Missing on older sessions; the default is −1.5 dB.
     pub(crate) output_gain: f32,
     pub(crate) input_channels: [bool; 2],
-    /// Path 1's channel enable in sessions from before paths.  Read only.
+    /// Path 1 from a session with no `paths`.  Read only.
     #[serde(skip_serializing)]
     pub(crate) output_channels: [bool; 2],
-    /// Path 1's mono in sessions from before paths.  Read only.
+    /// Path 1 from a session with no `paths`.  Read only.
     #[serde(skip_serializing)]
     pub(crate) mono: bool,
-    /// The master mute.
     pub(crate) mute: bool,
     pub(crate) drift: bool,
-    /// Linux low-latency / legacy Windows REAL-style switch.
+    /// On Windows [`Self::wasapi_output_mode`] is the choice.
     pub(crate) low_latency_output: bool,
-    /// Windows WASAPI clock mode. Missing on older sessions → derived from
-    /// [`Self::low_latency_output`].
+    /// Missing on an older session: derived from [`Self::low_latency_output`].
     #[serde(default)]
     pub(crate) wasapi_output_mode: Option<WasapiOutputMode>,
-    /// Path 1's input routing in sessions from before paths.  Read only.
+    /// Path 1 from a session with no `paths`.  Read only.
     #[serde(skip_serializing)]
     pub(crate) routes: [[bool; 4]; 2],
     /// Bridge buffer: 0 Auto, 1 Minimum, 2 Fixed (size in `bridge_buffer_ms`).
@@ -73,43 +58,29 @@ pub(crate) struct Session {
     pub(crate) bridge_buffer_mode: u8,
     #[serde(rename = "cushion_ms")]
     pub(crate) bridge_buffer_ms: f32,
-    /// Path 1's effect chain in sessions from before paths.  An entry that
-    /// cannot be read is skipped.  Read only.
+    /// Path 1's chain from a session with no `paths`.  Read only.
     #[serde(default, deserialize_with = "skip_unreadable", skip_serializing)]
     pub(crate) plugins: Vec<PluginPref>,
-    /// The Match paths reference and target.  Missing on older sessions:
-    /// the default target, matching the target.
+    /// Missing on an older session: the reference matches the target.
     #[serde(default, skip_serializing_if = "crate::app::match_paths::is_default")]
     pub(crate) match_paths: crate::app::match_paths::MatchPathsSettings,
-    /// The signal paths.  Sessions from before paths have none; their
-    /// top-level mix fields become path 1 ([`Self::migrate_paths`]).
-    ///
-    /// A path that cannot be read keeps its slot as a muted “Unreadable path”
-    /// with every send off, the same placeholder the top-level path list
-    /// uses, so one damaged path does not cost the session.
+    /// A session with none becomes path 1 from its mix fields.  An
+    /// unreadable path keeps its slot, so the session is not lost.
     #[serde(deserialize_with = "placeholder_unreadable")]
     pub(crate) paths: Vec<PathPref>,
-    /// Clock output level, mute and channel map.  Older sessions have none,
-    /// which loads as today's output (L → 1, R → 2, mono copy on the rest).
-    /// Applying such a session resets it on purpose: a session must restore the
-    /// routing, so this is not an `Option` like the EQs and the gate.  The
-    /// click mask is written (the type is the one preferences store) but
-    /// never applied: the click is not part of a session.  Loading one gives
-    /// each device the mask that physical device has now, as the clock or
-    /// an extra output (matched by id and backend), or none if it is not live.
+    /// Not an `Option`: an older session loads today's output and applying
+    /// it resets the routing on purpose.  The click mask is stored and
+    /// never applied.
     #[serde(rename = "clock_device")]
     pub(crate) clock_output: OutputDeviceSettings,
-    /// Extra output devices.  An entry that cannot be read is skipped.
-    /// Older sessions have none; applying one clears the list on purpose,
-    /// for the same reason as [`Self::clock_output`].  Their click masks
-    /// are handled the same way.
+    /// An older session has none, and applying it clears the list on
+    /// purpose, as with [`Self::clock_output`].
     #[serde(default, deserialize_with = "skip_unreadable", rename = "followers")]
     pub(crate) extra_outputs: Vec<ExtraOutputPref>,
 }
 
 impl Default for Session {
-    /// What a saved session falls back to field by field.  Empty device names
-    /// match no device, so loading such a session keeps the current one.
+    /// Empty device names match nothing, so the current device stays.
     fn default() -> Self {
         Self {
             name: "Untitled session".to_owned(),
@@ -149,11 +120,7 @@ impl Default for Session {
 }
 
 impl Session {
-    /// Moves a session from before paths onto `paths`: its top-level mix
-    /// fields become path 1.  What such a session did not store (an EQ or
-    /// gate from before they existed) is taken from `current`, so applying
-    /// it keeps that setting, as it always did.  A session that has paths is
-    /// left alone.
+    /// An EQ or gate the session never stored comes from `current`.
     pub(crate) fn migrate_paths(&mut self, current: &PathPref) {
         if !self.paths.is_empty() {
             return;
@@ -192,8 +159,7 @@ impl Session {
     }
 }
 
-/// Keeps the first (newest) session for each name, so older saves made before
-/// names were matched collapse into one entry.
+/// The first of a name is the newest.  Older saves collapse to one entry.
 pub(crate) fn unique_sessions(sessions: &[Session]) -> Vec<Session> {
     let mut unique: Vec<Session> = Vec::new();
     for session in sessions {

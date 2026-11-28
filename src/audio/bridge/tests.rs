@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use super::{select, Backend, Shared, StartConfig};
 
-/// A start with no ASIO driver and ordinary system device ids.
 fn plain() -> StartConfig {
     StartConfig {
         asio_clsid: None,
@@ -21,8 +20,7 @@ fn plain() -> StartConfig {
     }
 }
 
-/// Two system devices keep the cpal bridge, whatever the output settings are.
-/// Every target can select every arm, so this runs on each of them.
+/// Output settings do not change the arm.  Every target selects every arm.
 #[test]
 fn system_devices_fall_back_to_cpal() {
     let mut config = plain();
@@ -43,12 +41,11 @@ fn an_output_asio_driver_picks_the_output_bridge() {
 fn an_input_asio_driver_picks_the_input_bridge() {
     let mut config = plain();
     config.asio_clsid = Some(2);
-    // The output id does not matter when ASIO input owns the clock.
+    // The output id does not matter: ASIO input owns the clock.
     config.output_id = "pipewire:test_sink".into();
     assert_eq!(select(&config), Backend::AsioInput(2));
 }
 
-/// A native input id does not outrank the ASIO clock on the same side.
 #[test]
 fn an_input_asio_driver_outranks_a_native_input() {
     let mut config = plain();
@@ -57,7 +54,6 @@ fn an_input_asio_driver_outranks_a_native_input() {
     assert_eq!(select(&config), Backend::AsioInput(5));
 }
 
-/// A native id on the far side does not outrank ASIO output either.
 #[test]
 fn an_output_asio_driver_outranks_a_native_input() {
     let mut config = plain();
@@ -66,8 +62,8 @@ fn an_output_asio_driver_outranks_a_native_input() {
     assert_eq!(select(&config), Backend::AsioOutput(4));
 }
 
-/// Both sides on ASIO: the output variant still wins, and carries its own
-/// clsid.  `run_asio_output_bridge` turns the equal pair into a duplex run.
+/// Equal clsids still select the output arm.  That path turns them into
+/// a duplex run.
 #[test]
 fn an_output_asio_driver_outranks_an_input_one() {
     let mut config = plain();
@@ -90,7 +86,6 @@ fn a_native_output_id_picks_the_native_client() {
     assert_eq!(select(&config), Backend::LinuxNative);
 }
 
-/// The bare ALSA plugin id is not a native node; it stays with cpal.
 #[test]
 fn the_alsa_pipewire_shim_is_not_native() {
     let mut config = plain();
@@ -99,8 +94,7 @@ fn the_alsa_pipewire_shim_is_not_native() {
     assert_eq!(select(&config), Backend::Cpal);
 }
 
-/// The id form holds on every target: a prefix with no node name names
-/// nothing, and a node called "pipewire" is the bare plugin id.
+/// A node named `pipewire` is the bare plugin id, not a node.
 #[test]
 fn a_pipewire_prefix_without_a_node_is_not_native() {
     let mut config = plain();
@@ -111,8 +105,7 @@ fn a_pipewire_prefix_without_a_node_is_not_native() {
     assert_eq!(select(&config), Backend::Cpal);
 }
 
-/// The ASIO arms this platform does not build report that instead of opening
-/// anything: an arm that silently fell back would bridge on the wrong host.
+/// A silent fallback would bridge on the wrong host.
 #[cfg(not(target_os = "windows"))]
 #[test]
 fn the_asio_arms_are_not_here() {

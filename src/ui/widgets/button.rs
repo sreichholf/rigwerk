@@ -1,11 +1,5 @@
-//! The outline button: slot fill, a hairline border, Control text, and
-//! [`CONTROL_H`] high, so it lines up with a [`TextField`] on one row.
-//!
-//! Every plain action button in a sheet, a drawer, a strip or a page is
-//! this one.  A button with its own meaning (a danger or a status colour,
-//! a selected choice) keeps its own look.
-//!
-//! [`TextField`]: super::TextField
+//! The outline button, [`CONTROL_H`] high, so it lines up with a text field.
+//! A button with its own meaning keeps its own look.
 
 use eframe::egui;
 use egui::{CornerRadius, RichText, Stroke, Vec2};

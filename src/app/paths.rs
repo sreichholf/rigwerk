@@ -1,29 +1,8 @@
-//! Signal paths as the app holds them, and the actions the UI calls on them.
-//!
-//! The app keeps one [`SignalPath`] per live path slot in
-//! [`RigWerkApp::paths`] (indexed by the engine's slot, which never moves
-//! while the path lives) and pushes each one's [`PathMix`] to the engine
-//! every frame, like the other mix settings.  The plugin chain of each
-//! path lives in the engine.  How a path reaches each output device lives
-//! with the device: `OutputDeviceSettings::path_map[slot]`.
-//!
-//! The Mixer and Plugins pages edit [`RigWerkApp::selected_path`]
-//! ([`RigWerkApp::path`] / [`RigWerkApp::path_mut`]).
-//!
-//! Slots are engine-internal.  The UI lists paths in
-//! [`RigWerkApp::path_order`] (the display order: paths are appended as
-//! they are added), and that is also the order they are saved in: each
-//! device's `path_map` is compacted to it.  Loading reuses the live slots
-//! first, in order, then free ones.
-//!
-//! A removed path keeps its device entries while it fades out, so it fades
-//! where it played; the next path in that slot overwrites them.
-//!
-//! A return ([`PathFeed::Sends`]) runs on the other paths' sends.  Sends
-//! are indexed by slot like the device maps, and saved in the display
-//! order the same way.  Only a path fed by the input sends, and only to a
-//! return: a path that stops being a return, or goes away, takes every
-//! send to it along.  A return is solo-safe and has no solo of its own.
+//! A slot never moves while the path lives.  `path_order` is the display
+//! order and the save order.  A removed path keeps its device entries
+//! while it fades.  Only an input-fed path sends, and only to a return;
+//! a path that stops being a return takes every send to it along.  A
+//! return is solo-safe and has no solo of its own.
 
 use crate::app::cab::CabInstall;
 use crate::app::chain::ChainSelection;
@@ -186,11 +165,8 @@ pub(crate) struct SignalPath {
 }
 
 impl SignalPath {
-    /// The path `pref` describes, its blocks numbered from `first_id`.  A
-    /// slot the engine may still hold block state for passes the first id
-    /// it has not used, so a new block never takes an old one's model.
-    /// The blocks are put in stack order (the `Pre` group, then `Post`):
-    /// a row or a sheet names a block by its index in that order.
+    /// Numbered from `first_id`, past any id the engine still holds, so
+    /// a new block never takes an old model's slot.
     pub(crate) fn from_pref(pref: &PathPref, first_id: u32) -> Self {
         let nam: Vec<NamBlock> = pref
             .nam_blocks
@@ -262,30 +238,21 @@ impl SignalPath {
         self.nam = ordered;
     }
 
-    /// The blocks' ids, in signal order.
     pub(crate) fn nam_ids(&self) -> Vec<u32> {
         self.nam.iter().map(|block| block.controls.id).collect()
     }
 
-    /// The blocks as saved: their captures and controls, in signal order.
     pub(crate) fn nam_settings(&self) -> Vec<NamBlockSettings> {
         self.nam.iter().map(NamBlock::settings).collect()
     }
 
-    /// Whether any block runs.
     pub(crate) fn nam_active(&self) -> bool {
         self.nam.iter().any(NamBlock::active)
     }
 
-    /// The dilation scale each block should run at, in order: 2 for every
-    /// installed capture that can be oversampled once its series holds two
-    /// or more of them, 1 otherwise.
-    ///
-    /// The `Pre` and `Post` groups are separate series.  With no effects
-    /// between them (`effects_empty`) they are one series, so a pedal before
-    /// the effects and an amp after them oversample together; one plugin
-    /// between them splits the series and each side is judged alone.  A
-    /// bypassed block still counts while its model is installed.
+    /// `Pre` and `Post` are separate series.  With no effects between
+    /// them they are one, so a pedal and an amp oversample together.
+    /// A bypassed block still counts while its model is installed.
     pub(crate) fn nam_factors(&self, effects_empty: bool) -> Vec<u8> {
         let eligible: Vec<bool> = self.nam.iter().map(NamBlock::can_oversample).collect();
         let count = |position: NamPosition| {
@@ -449,7 +416,6 @@ impl RigWerkApp {
         })
     }
 
-    /// The live returns, in display order.
     pub(crate) fn return_slots(&self) -> Vec<usize> {
         self.path_slots()
             .into_iter()
@@ -457,8 +423,7 @@ impl RigWerkApp {
             .collect()
     }
 
-    /// The live paths fed by the input, in display order: the ones that
-    /// can send.
+    /// Fed by the input: the ones that can send.
     pub(crate) fn sender_slots(&self) -> Vec<usize> {
         self.path_slots()
             .into_iter()
@@ -470,11 +435,10 @@ impl RigWerkApp {
             .collect()
     }
 
-    /// Feeds path `slot` from the input or from the other paths' sends.  A
-    /// new return keeps no sends or solo of its own, and its routing goes
-    /// back to the default (it has no input to route).  A path that stops
-    /// being a return takes every send to it along.  The last path fed by
-    /// the input stays on it: a return would have nothing to hear.
+    /// A new return keeps no sends or solo, and its routing goes back
+    /// to the default.  A path that stops being a return takes every
+    /// send to it along.  The last input-fed path stays on the input:
+    /// a return would have nothing to hear.
     pub(crate) fn set_path_feed(&mut self, slot: usize, feed: PathFeed) {
         if feed == PathFeed::Sends && self.sender_slots() == [slot] {
             self.push_log(
@@ -1165,9 +1129,8 @@ impl RigWerkApp {
         }
     }
 
-    /// Pushes every live path's settings to the engine.  Called each frame.
-    /// The NAM blocks go separately: their stack is too large for the
-    /// [`PathMix`] snapshot.
+    /// The NAM stack is too large for the [`PathMix`] snapshot, so it
+    /// goes separately.
     pub(crate) fn push_paths_to_engine(&self) {
         for (slot, path) in self.paths.iter().enumerate() {
             if let Some(path) = path {
@@ -1177,20 +1140,15 @@ impl RigWerkApp {
         }
     }
 
-    /// Pushes the clock output and the extra outputs to the engine.
     pub(crate) fn push_devices_to_engine(&mut self) {
         self.engine.set_clock_output(&self.clock_output);
         self.push_extra_outputs_to_engine();
     }
 
-    /// Replaces every path with `prefs` (a loaded session) and the
-    /// output devices with `clock` and `extra_outputs`, whose `path_map` is in
-    /// the order of `prefs`.  The paths reuse the live slots first, in
-    /// display order (so a live path just changes its settings, with the
-    /// usual ramps), then free slots.  Live paths left over are removed with
-    /// a fade, and keep their device entries until it ends.  Plugins are
-    /// restored, not opened; a running bridge opens them on the next frame
-    /// and the mixer keeps the path silent until then.
+    /// Reuses the live slots first, so a live path only changes its
+    /// settings.  Paths left over fade and keep their device entries
+    /// until that ends.  Plugins are restored, not opened; the mixer
+    /// keeps the path silent until the next frame opens them.
     pub(crate) fn install_paths(
         &mut self,
         prefs: &[PathPref],
@@ -1293,10 +1251,8 @@ impl RigWerkApp {
         self.check_nam_load();
     }
 
-    /// The first NAM block id path slot `slot` has not handed out: past the
-    /// live path's ids and past every id the engine still publishes there
-    /// (a slot live only in the engine, or still fading out).  0 for a slot
-    /// that holds nothing.
+    /// Past the live path's ids and past every id the engine still
+    /// publishes there, including a slot that is only fading out.
     fn unused_nam_id(&self, slot: usize) -> u32 {
         let app = self
             .paths
@@ -1317,12 +1273,8 @@ impl RigWerkApp {
         app.max(engine)
     }
 
-    /// The live paths as they should be saved (fresh plugin state), and
-    /// the slot order they are saved in (the display order).
-    ///
-    /// The open editor is read in full first: a plugin may change a value
-    /// without reporting it, and the save lists the effects from what that
-    /// read stored.  No editor open makes this a no-op.
+    /// The open editor is read in full first: a plugin may change a
+    /// value without reporting it.
     pub(crate) fn saved_paths(&self) -> (Vec<PathPref>, Vec<usize>) {
         self.sync_plugin_editor();
         let order = self.path_slots();

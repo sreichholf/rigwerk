@@ -1,10 +1,5 @@
-//! The output devices under the master, as plain rows.
-//!
-//! The console strips, the output sheet and the issues drawer read the same
-//! list.  A row is names,
-//! flags, and settings.  The colour of a device's state stays in `ui`.
-//! [`ExtraOutputReading`] is what an extra output's own stream really runs at,
-//! from the live snapshot.
+//! A save stores the trim, not how it was set, so a loaded nonzero trim
+//! reads as set by hand.
 
 use std::time::{Duration, Instant};
 
@@ -257,7 +252,7 @@ impl RigWerkApp {
         })
     }
 
-    /// The output devices under the master, clock output first, then extra outputs.
+    /// Clock output first, then the extra outputs.
     pub(crate) fn output_device_rows(&self) -> Vec<OutputDeviceRow> {
         let output = self.selected_output();
         let reported = if self.engine.state == EngineState::Running {

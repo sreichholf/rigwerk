@@ -1,20 +1,7 @@
-//! The plugin's own graphical editor, in a window of the plugin's making.
-//!
-//! A VST3 editor embeds in a native window created here: Win32, or X11 on
-//! Linux, which needs an X server (`DISPLAY`, XWayland included).  The host
-//! does not implement `IWaylandHost` / `IWaylandFrame`, so a session with
-//! no X server cannot open it.  Its timers and fds run from the VST3 run
-//! loop, which the engine services every frame.
-//!
-//! A CLAP editor embeds in a native window created here (Win32, or X11 when
-//! an X server is reachable), or floats in a toplevel of its own (pure
-//! Wayland, or a plugin that only floats).  The plugin's GUI callbacks only
-//! set flags on its host; [`ClapGuiWindow::service`] follows them once per
-//! frame.
-//!
-//! Both reach the plugin through its [`PluginHandle`] (the UI-only lock the
-//! audio thread never takes), so an editor at work never makes the audio
-//! callback skip the effect.
+//! The host does not implement Wayland, so a VST3 editor needs an X
+//! server.  Both editors reach the plugin through its handle: the audio
+//! thread never takes that lock.  `handle` is declared after `kind`, so
+//! the editor detaches before the reference goes.
 
 use crate::app::LogTone;
 use std::sync::Arc;

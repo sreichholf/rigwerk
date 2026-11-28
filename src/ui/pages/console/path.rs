@@ -1,8 +1,3 @@
-//! A path strip: the 3 pt cap in the path colour, the name and its menu
-//! (rename, colour, duplicate, layout, remove with a two-click confirm),
-//! the *Source* button and popover, the chain (`chain.rs`), the chain's
-//! latency and the path's DSP load, and the level with *M* and *S*.
-
 use eframe::egui;
 use egui::{CornerRadius, Rect, RichText, Sense, Vec2};
 
@@ -151,7 +146,6 @@ impl RigWerkApp {
         }
     }
 
-    /// The name, the issue marker after it, and the name's menu.
     fn path_name(&mut self, ui: &mut egui::Ui, slot: usize, name: &str) {
         let colours = palette(ui.ctx());
         let issue = self
@@ -180,8 +174,6 @@ impl RigWerkApp {
         popover(ui, &response, |ui| self.path_menu(ui, slot, name));
     }
 
-    /// The name's menu: *Rename*, *Colour ▸*, *Duplicate (muted)*, *Apply
-    /// layout ▸*, *Remove* with a two-click confirm.
     fn path_menu(&mut self, ui: &mut egui::Ui, slot: usize, name: &str) {
         let colours = palette(ui.ctx());
         ui.set_min_width(200.0);
@@ -266,8 +258,6 @@ impl RigWerkApp {
         }
     }
 
-    /// The source popover: the 2 × 2 grid (*In 1*, *In 2* → L, R) and
-    /// *Stereo* / *Mono*.
     fn source_popover(&mut self, ui: &mut egui::Ui, slot: usize) {
         let colours = palette(ui.ctx());
         let Some(mix) = self.paths[slot].as_ref().map(|path| path.mix) else {
@@ -318,7 +308,6 @@ impl RigWerkApp {
     }
 }
 
-/// The small mark a visible issue leaves on a strip.
 fn issue_marker(ui: &mut egui::Ui, severity: crate::app::issues::IssueSeverity, hover: &str) {
     let colours = palette(ui.ctx());
     let colour = match severity {

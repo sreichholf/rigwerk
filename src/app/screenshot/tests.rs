@@ -1,6 +1,4 @@
-//! Tests for the size parsing, the ending → exit-code table, the run deadline,
-//! the ending latch and the capture deadline.  The rest of the frame loop
-//! (settling, capture, close) draws a window, so it is not covered here.
+//! The rest of the frame loop draws a window, so it is not covered here.
 
 use super::*;
 

@@ -238,7 +238,6 @@ fn the_device_level_scales_after_the_map() {
     assert!((gain - 0.501).abs() < 0.001);
 }
 
-/// Runs `frames` frames of a constant mix through one block.
 fn run(
     mapper: &mut DeviceMapper,
     controls: &DeviceControls,
@@ -456,7 +455,7 @@ fn path_entries_save_compactly_and_old_maps_load_as_path_one() {
     assert_eq!(old.map(0), ChannelMap { left: 4, right: 8 });
     assert_eq!(old.path_map[1], PathMapSettings::default());
     assert_eq!(old.level_db, -3.0);
-    // Files from before the align switch align.
+    // A save that omits align still aligns.
     assert!(old.align);
 
     let unaligned = OutputDeviceSettings {
@@ -675,7 +674,6 @@ fn a_mono_device_is_reached_by_any_map() {
     assert!(!map(0, 0).reaches_any(8));
 }
 
-/// Path 0 alone.
 const ONE_PATH: [bool; MAX_PATHS] = [true, false, false, false];
 
 #[test]
@@ -804,8 +802,8 @@ fn device_mute_ramps_the_tick_out() {
         lane[0]
     );
     assert!(lane[1] > 0.0 && lane[1] < lane[0], "the ramp keeps moving");
-    // The step is 1/288, which is not exact in f32, so the ramp lands on 0
-    // on the sample that crosses the target: one sample past the nominal length.
+    // 1/288 is not exact in f32, so the ramp lands on 0 one sample past
+    // the nominal length.
     let settled = lane
         .iter()
         .position(|sample| *sample == 0.0)
@@ -1001,7 +999,6 @@ fn tick_lane(mapper: &mut DeviceMapper, ticks: &[usize], frames: usize) -> Vec<f
     lane
 }
 
-/// The frames of `lane` that carry anything.
 fn ticked(lane: &[f32]) -> Vec<usize> {
     (0..lane.len()).filter(|&i| lane[i] != 0.0).collect()
 }
@@ -1354,12 +1351,11 @@ fn a_non_default_loudness_setting_survives_a_save() {
     let back: OutputDeviceSettings = ron::from_str(&text).expect("loaded");
     assert_eq!(back.loudness, settings.loudness);
 
-    // The default is left out, so an older file's bytes stay unchanged.
+    // The default is left out, so the save's bytes do not change.
     let text = ron::to_string(&OutputDeviceSettings::default()).expect("saved");
     assert!(!text.contains("loudness"), "{text}");
 
-    // The branch before this one wrote loudness.auto.  The unknown field is
-    // ignored, and the target still loads.
+    // An unknown field is ignored and the target still loads.
     let old = r#"(level_db:0.0,loudness:(auto:true,target_lufs:-20.0))"#;
     let old: OutputDeviceSettings = ron::from_str(old).expect("old save");
     assert_eq!(old.loudness.target_lufs, -20.0);

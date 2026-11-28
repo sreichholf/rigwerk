@@ -1,11 +1,7 @@
-//! The in-memory stream a plugin reads and writes its state through, and
-//! the envelope a saved VST3 state is stored in.
-//!
-//! The envelope is the one vst3-host 0.11.1 wrote (`plugin.rs`) when it
-//! hosted RigWerk's plugins, byte for byte, because saved preferences hold
-//! it and an older RigWerk reads any other blob as raw component state: 16 bytes `VST3HOST_STATE\0\0`, then
-//! little-endian u32 version (1), component length and controller length
-//! (`u32::MAX` for no controller state), then the two payloads.
+//! Saved VST3 state uses the vst3-host 0.11.1 envelope (`plugin.rs`),
+//! byte for byte: any other blob is raw component state.  Sixteen bytes
+//! `VST3HOST_STATE\0\0`, then little-endian u32 version (1), component
+//! length, controller length (`u32::MAX` means none), then the payloads.
 
 use std::ffi::CStr;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -23,25 +19,19 @@ use ::vst3::{Class, ComWrapper};
 
 use super::message::HostAttributeList;
 
-/// The most a plugin may grow a stream to, or seek to.  The cursor and the
-/// write length come from the plugin; this keeps a wild seek from turning
-/// the next write into a huge allocation.  Far above any real state.
+/// The most a plugin may grow a stream to, or seek to.  A wild seek must
+/// not turn the next write into a huge allocation.
 pub(crate) const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
 
-/// A growable byte buffer with a cursor (`IBStream`, `ISizeableStream`),
-/// which tells the plugin what kind of state it carries
-/// (`IStreamAttributes`).
 pub(crate) struct MemoryStream {
-    /// The bytes and the cursor.
     data: Mutex<(Vec<u8>, usize)>,
-    /// `PresetAttributes::kStateType` and nothing else; no file name.
+    /// `PresetAttributes::kStateType` only.  No file name.
     attributes: ComWrapper<HostAttributeList>,
 }
 
 impl MemoryStream {
-    /// A stream holding `bytes`, with the cursor at the start.  Its state
-    /// type is project state: every component and controller state RigWerk
-    /// saves or restores belongs to its saved session, not to a preset.
+    /// Cursor at the start.  State type is project: a saved session, not a
+    /// preset.
     pub(crate) fn new(bytes: Vec<u8>) -> Self {
         let attributes = HostAttributeList::new();
         // SAFETY: both are the bindings' NUL-terminated `'static` literals.
@@ -58,7 +48,6 @@ impl MemoryStream {
         }
     }
 
-    /// Everything in the stream.
     pub(crate) fn bytes(&self) -> Vec<u8> {
         self.data().0.clone()
     }
@@ -140,7 +129,7 @@ impl IBStreamTrait for MemoryStream {
         let mut data = self.data();
         let (bytes, cursor) = &mut *data;
         let end = cursor.saturating_add(count);
-        // Over the cap nothing is written; an empty write copies nothing.
+        // Over the cap nothing is written.
         let written = if end > MAX_STREAM_BYTES || count == 0 {
             0
         } else {
@@ -184,7 +173,7 @@ impl IBStreamTrait for MemoryStream {
         } else {
             return kInvalidArgument;
         };
-        // Before the start lands on the start, as vst3-host 0.11.1 did.
+        // A seek before the start lands on the start (vst3-host 0.11.1).
         let Some(target) = base.checked_add(pos).map(|target| target.max(0)) else {
             return kInvalidArgument;
         };
@@ -230,7 +219,6 @@ impl ISizeableStreamTrait for MemoryStream {
     }
 }
 
-/// A plugin's two state streams.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StateBlob {
     pub(crate) component: Vec<u8>,
@@ -244,8 +232,7 @@ const STATE_HEADER: usize = 16 + 4 + 4 + 4;
 /// The controller length that means "no controller state".
 const NO_CONTROLLER: u32 = u32::MAX;
 
-/// The envelope for `blob`.  Both payloads together may use what one
-/// stream may hold.
+/// Both payloads together may use what one stream may hold.
 pub(crate) fn encode_state(blob: &StateBlob) -> Result<Vec<u8>, String> {
     let controller = blob.controller.as_deref();
     let payload = blob.component.len() + controller.map_or(0, <[u8]>::len);
@@ -268,8 +255,8 @@ pub(crate) fn encode_state(blob: &StateBlob) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// The two states in an envelope.  Bytes without the magic are a blob
-/// saved before the envelope: raw component state.
+/// Bytes without the magic are raw component state (saves from before
+/// the envelope).
 pub(crate) fn decode_state(bytes: &[u8]) -> Result<StateBlob, String> {
     if !bytes.starts_with(STATE_MAGIC) {
         if bytes.len() > MAX_STREAM_BYTES {

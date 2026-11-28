@@ -1,36 +1,8 @@
-//! The glossary test (docs/ui-spec.md §2.1, §11): no string literal in the
-//! code uses a word the glossary keeps out of the UI.  It reads the source
-//! text, not the binary, so it sees every literal, including log lines and
-//! hover text.  `tests.rs` files are not read: a test may name the old word
-//! on purpose (an old save, a rejected label).  The same walk also checks the
-//! layer direction AGENTS.md states, in production files: `audio` names no
-//! `app`, `ui`, `egui` or `eframe`, and `app` names no `ui`.  `tests.rs` files
-//! are exempt, so `app/tests.rs` and `app/appearance/tests.rs` still name
-//! `crate::ui`.
-//!
-//! One gate reads a single file: the browser must reach CLAP through
-//! `clap::scan_library_isolated`, the child process, because the in-process
-//! `clap::scan_library` loads every bundle into this process.  The last test
-//! here covers the binary's own `--clap-scan` arguments.
-//!
-//! A third check pins the allocation guard at the entry point of each audio
-//! callback a normal test cannot enter on every platform, and the panic guard
-//! on the callbacks that would otherwise unwind into the host.
-//!
-//! A fourth check reads the same walk for the light theme: the surfaces that
-//! once drew the dark tokens (`ui/calibration.rs`, the shell windows in
-//! `ui/frame.rs`, the tab and progress helpers in `ui/widgets/mod.rs`) and the
-//! tuner's note, which named a raw `FontId::new`, name none of them and
-//! invent no colour literal.
-//!
-//! A fifth check pins the UI-to-app rule inside `ui`: a production file
-//! there reaches the engine only through a `RigWerkApp` method, never
-//! `app.engine` or `self.engine`.
-
+//! Source scanners.  `tests.rs` is not read: a test may name a banned word
+//! on purpose.
 use std::path::{Path, PathBuf};
 
-/// The unambiguous words from the "Never in the UI" column.  Whole words,
-/// case-insensitive, so *patch* does not match *dispatch*.
+/// The unambiguous words from the "Never in the UI" column.
 const BANNED: &[&str] = &[
     "cushion",
     "follower",
@@ -55,26 +27,17 @@ const BANNED: &[&str] = &[
     "lookahead",
 ];
 
-/// Platform code, where the word is the platform's own term (`quantum` in
-/// PipeWire, `endpoint` in WASAPI).  Every literal in these folders may use
-/// any banned word.  It stays.
+/// The platform's own term (`quantum` in PipeWire, `endpoint` in WASAPI).
+/// A literal here may use any banned word.
 const PLATFORM: &[&str] = &["src/audio/linux/", "src/audio/win/"];
 
-/// Files whose literals are stored preference values, not text a person
-/// reads.  §2.4 keeps the stored keys unchanged, so those literals stay.
-const STORED_KEYS: &[&str] = &[
-    // The saved output mode, read from files written before the rename.
-    "src/app/latency.rs",
-];
+/// Stored preference values, not text a person reads.  Those literals stay.
+const STORED_KEYS: &[&str] = &["src/app/latency.rs"];
 
-/// Files not migrated yet, with the banned words each one may still use.
-/// Each entry says which step of the rewrite removes it (docs/ui-spec.md
-/// §2.4 for a code rename, §12 for a step); the test fails when an entry
-/// allows a word the file no longer uses, so the list only shrinks.  Step 8
-/// empties it.
+/// A file and the banned words it may still use.  An entry for a word the
+/// file no longer uses fails, so the list only shrinks.
 const NOT_MIGRATED: &[(&str, &[&str])] = &[];
 
-/// One banned word in one literal.
 #[derive(Debug, PartialEq)]
 struct Hit {
     file: String,
@@ -83,7 +46,6 @@ struct Hit {
     literal: String,
 }
 
-/// The `.rs` files under `dir`, as paths relative to the crate, sorted.
 fn sources(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .expect("read src")
@@ -113,16 +75,14 @@ fn sources(dir: &Path, root: &Path, out: &mut Vec<(String, PathBuf)>) {
     }
 }
 
-/// The string literals in `source` with the line each starts on.  Comments,
-/// char literals and lifetimes are skipped, and so is every literal inside a
-/// `#[serde(...)]` attribute: those name stored keys, which keep their old
-/// spelling on purpose.
+/// String literals, with the line each starts on.  Comments, char literals
+/// and lifetimes are skipped, and so is a `#[serde(...)]` literal: those
+/// name stored keys and keep their old spelling.
 fn literals(source: &str) -> Vec<(usize, String)> {
     let chars: Vec<char> = source.chars().collect();
     let mut out = Vec::new();
     let mut line = 1;
     let mut index = 0;
-    // Bracket depth inside a `#[serde(...)]`, while one is open.
     let mut serde_depth: Option<usize> = None;
     let ident = |c: char| c.is_alphanumeric() || c == '_';
     while index < chars.len() {
@@ -195,7 +155,6 @@ fn literals(source: &str) -> Vec<(usize, String)> {
                 }
             }
             'r' | 'b' | 'c' if index == 0 || !ident(chars[index - 1]) => {
-                // `r"…"`, `r#"…"#`, `br"…"`, `b"…"`, `c"…"`.
                 let mut at = index + 1;
                 if c != 'r' && chars.get(at) == Some(&'r') {
                     at += 1;
@@ -206,7 +165,6 @@ fn literals(source: &str) -> Vec<(usize, String)> {
                     hashes += 1;
                 }
                 if chars.get(at + hashes) != Some(&'"') {
-                    // An identifier that starts with r, b or c.
                     index += 1;
                     while index < chars.len() && ident(chars[index]) {
                         index += 1;
@@ -245,8 +203,7 @@ fn literals(source: &str) -> Vec<(usize, String)> {
     out
 }
 
-/// A `"…"` body from `start`, and the index after its closing quote.
-/// Escapes are kept as written; `\n` counts as a line only when real.
+/// An escape is not decoded.  Only a real newline counts as a line.
 fn read_quoted(chars: &[char], start: usize) -> (String, usize) {
     let mut text = String::new();
     let mut index = start;
@@ -269,7 +226,6 @@ fn read_quoted(chars: &[char], start: usize) -> (String, usize) {
     (text, index)
 }
 
-/// A raw string body from `start`, closed by `"` and `hashes` hashes.
 fn read_raw(chars: &[char], start: usize, hashes: usize) -> (String, usize) {
     let mut index = start;
     while index < chars.len() {
@@ -281,8 +237,7 @@ fn read_raw(chars: &[char], start: usize, hashes: usize) -> (String, usize) {
     (chars[start..].iter().collect(), index)
 }
 
-/// The text a person reads: `{name}` and `{name:>4}` placeholders in a
-/// format string name variables, not words, and are blanked.
+/// Blanks `{name}` and `{name:>4}`: a placeholder names a variable, not a word.
 fn readable(literal: &str) -> String {
     let mut out = String::with_capacity(literal.len());
     let mut rest = literal;
@@ -315,8 +270,7 @@ fn readable(literal: &str) -> String {
     out
 }
 
-/// Whether `text` holds `word` as a whole word, ignoring case.  Letters,
-/// digits and `_` continue a word; a hyphen does not.
+/// A hyphen does not continue a word, so `REAL-style` is one word.
 fn has_word(text: &str, word: &str) -> bool {
     let text = text.to_lowercase();
     let word = word.to_lowercase();
@@ -327,7 +281,6 @@ fn has_word(text: &str, word: &str) -> bool {
     })
 }
 
-/// Every banned word in every literal of the files under `src/`.
 fn hits() -> Vec<Hit> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
@@ -427,11 +380,8 @@ fn whole_words_only_and_placeholders_are_not_words() {
     assert!(!has_word(&readable("level {insert:>5.1} dB"), "insert"));
 }
 
-/// The layer direction AGENTS.md states ("Separation"), by prefix, for
-/// production files: a file in `src/audio/` (or `src/audio.rs`) names neither
-/// `crate::app` nor `crate::ui` and names neither `egui` nor `eframe`; a
-/// file in `src/app/` (or `src/app.rs`) names no `crate::ui`.  `app` does
-/// name `egui` for the theme and the zoom, so only `audio` lists it.
+/// Names a production file must not use.  `app` does name `egui` for the
+/// theme and the zoom, so only `audio` lists it.
 const LAYERING: &[(&str, &[&str])] = &[
     ("src/audio/", &["crate::app", "crate::ui", "egui", "eframe"]),
     (
@@ -442,12 +392,9 @@ const LAYERING: &[(&str, &[&str])] = &[
     ("src/app.rs", &["crate::ui"]),
 ];
 
-/// The 1-based lines of `source` that name one of `names`, with the name each
-/// one used.  The check counts a name anywhere on a code line, including
-/// inside a longer path or a string, and it does not strip block comments:
-/// only a line whose first characters are `//` is prose.  `audio/nam.rs`
-/// links to `crate::app::settings::PathPref` in a doc comment, and a doc link
-/// is not a reference.
+/// A `//` line is prose, so a doc link is not a reference.  A name inside a
+/// longer path, a string or a block comment still counts: those are not
+/// stripped.
 fn boundary_lines<'a>(source: &str, names: &'a [&'a str]) -> Vec<(usize, &'a str)> {
     let mut out = Vec::new();
     for (index, line) in source.lines().enumerate() {
@@ -463,7 +410,6 @@ fn boundary_lines<'a>(source: &str, names: &'a [&'a str]) -> Vec<(usize, &'a str
     out
 }
 
-/// Every place a file names the layer above it, as `file:line: name`.
 fn boundary_hits() -> Vec<String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
@@ -496,8 +442,8 @@ fn a_comment_is_not_a_layer_reference() {
     );
 }
 
-/// A residual gap: `super::super::app` is a valid path from `src/audio/*.rs`
-/// and holds none of these names, so this text check cannot see it.
+/// `super::super::app` from `src/audio/*.rs` holds none of these names, so
+/// this check cannot see it.
 #[test]
 fn a_layer_does_not_name_the_one_above_it() {
     let hits = boundary_hits();
@@ -508,11 +454,9 @@ fn a_layer_does_not_name_the_one_above_it() {
     );
 }
 
-/// CLAP is the one scan that runs third-party code, so the browser must reach
-/// it through the child process: the in-process `clap::scan_library` calls a
-/// bundle's `init` in this process.  `app/plugins.rs` has its own
-/// `scan_library` for the whole library, which is why the two call names are
-/// counted apart.
+/// `app/plugins.rs` has its own `scan_library`, so the two call names are
+/// counted apart.  The in-process `clap::scan_library` calls a bundle's
+/// `init` in this process.
 #[test]
 fn the_browser_scans_clap_in_a_child_process() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/plugins.rs");
@@ -539,12 +483,8 @@ fn the_browser_scans_clap_in_a_child_process() {
     );
 }
 
-/// One `--clap-scan` table row: the argv, and the file and limit expected.
 type ClapScanCase<'a> = (&'a [&'a str], Option<(&'a str, u64)>);
 
-/// `--clap-scan` takes a file and a limit and nothing else.  A missing path, a
-/// missing or unusable limit, or a negative one leaves `main` to exit 2; a
-/// trailing argument is ignored rather than read as part of the limit.
 #[test]
 fn clap_scan_arguments_are_parsed_or_refused() {
     let cases: &[ClapScanCase] = &[
@@ -578,14 +518,14 @@ fn clap_scan_arguments_are_parsed_or_refused() {
     );
 }
 
-/// A screenshot run's recorded ending is its process status; the exit-code
-/// table itself is pinned by `app::screenshot`'s `every_ending_has_its_own_exit_code`.
+/// The exit-code table is pinned by `app::screenshot`'s
+/// `every_ending_has_its_own_exit_code`.
 #[test]
 fn a_recorded_screenshot_ending_is_the_process_status() {
     use crate::app::screenshot::{EXIT_RUN_TIMED_OUT, NO_ENDING};
 
     // Saved, viewport mismatch, save failed, capture timed out.  A launch
-    // result never overrides a recorded ending, either way.
+    // result never overrides a recorded ending.
     for ending in [0, 1, 3, 5] {
         assert_eq!(crate::screenshot_exit_status(ending, true), Some(ending));
         assert_eq!(crate::screenshot_exit_status(ending, false), Some(ending));
@@ -599,10 +539,8 @@ fn a_recorded_screenshot_ending_is_the_process_status() {
     assert_eq!(crate::screenshot_exit_status(NO_ENDING, false), None);
 }
 
-/// The files whose audio callback must hold `RtGuard`: ASIO's dispatch (the
-/// silence and panic paths included), the cpal capture, the duplex filter, the
-/// native capture, the virtual source, the sink monitor, and both mixer
-/// renders.
+/// Callback files that must enter `RtGuard`.  ASIO's one file covers the
+/// silence and panic paths too.
 const GUARDED_CALLBACKS: &[&str] = &[
     "src/audio/win/asio/callback.rs",
     "src/audio/input.rs",
@@ -614,13 +552,12 @@ const GUARDED_CALLBACKS: &[&str] = &[
     "src/audio/extra_output/mixer.rs",
 ];
 
-/// A tripwire for the entry points a normal test cannot enter on every
-/// platform.  A test's own `RtGuard` is the outermost one, and `RtGuard`
-/// counts only the outermost, so a test that drives the code under a guard
-/// still reads zero when the callback's own guard is gone; `audio/mixer`'s
-/// and `extra_output`'s counted blocks have the same blind spot.  This check
-/// is file-level on purpose: following a signature to its closing brace would
-/// be a fragile indirection for the same evidence.
+/// A tripwire for entry points a normal test cannot enter on every platform.
+/// A test's own `RtGuard` is the outermost, and `RtGuard` counts only the
+/// outermost, so a test under a guard still reads zero when the callback's
+/// own guard is gone.  `audio/mixer` and `extra_output` have the same blind
+/// spot.  File-level on purpose: a brace match would be a fragile stand-in
+/// for the same evidence.
 #[test]
 fn every_audio_callback_holds_the_allocation_guard() {
     assert!(
@@ -649,11 +586,8 @@ fn every_audio_callback_holds_the_allocation_guard() {
     );
 }
 
-/// The files whose backend callback must keep a panic inside RigWerk, and the
-/// call each one uses: the shared `contain` guard, the `render_or_silence`
-/// wrapper that contains the clock and extra-output cpal renders, or ASIO's
-/// own catch.  A file-level tripwire, as [`GUARDED_CALLBACKS`] is for the
-/// allocation guard.
+/// Callback files and the call that keeps a panic inside RigWerk.
+/// File-level, as [`GUARDED_CALLBACKS`] is.
 const CONTAINED_CALLBACKS: &[(&str, &str)] = &[
     ("src/audio/input.rs", "contain("),
     // The clock output's callback goes through `render_or_silence`, which is
@@ -670,11 +604,9 @@ const CONTAINED_CALLBACKS: &[(&str, &str)] = &[
     ("src/audio/win/asio/callback.rs", "catch_unwind"),
 ];
 
-/// Every backend callback has to keep its panic inside RigWerk: an unwind
-/// across the host's C callback is undefined behaviour or an abort (see
-/// `audio/panic_guard`).  The callbacks themselves need a device or a live
-/// graph, so this checks the routing in the source, as the allocation guard
-/// check above does.
+/// An unwind across the host's C callback is undefined behaviour or an
+/// abort (`audio/panic_guard`).  These callbacks need a device or a live
+/// graph, so this checks the source, as the allocation guard does.
 #[test]
 fn every_audio_callback_contains_its_body() {
     assert!(
@@ -703,26 +635,18 @@ fn every_audio_callback_contains_its_body() {
     );
 }
 
-/// The files the light theme used to miss, with the names each one must not
-/// use besides [`DARK_ONLY`].  They drew the dark tokens (`CARD`, `TEAL`, …)
-/// straight from `theme.rs`, so they stayed dark under the light palette
-/// (finding U8).  They read [`crate::ui::theme::palette`] now.
+/// Files that must not name a [`DARK_ONLY`] token, plus any name of their own.
 const PALETTE_ONLY: &[(&str, &[&str])] = &[
     ("src/ui/calibration.rs", &[]),
     ("src/ui/frame.rs", &[]),
-    // The note is sized by the type scale now, so a literal point size is as
-    // retired here as a dark token.
+    // A literal point size is banned here the same way a dark token is.
     ("src/ui/pages/tuner.rs", &["FontId::new"]),
     ("src/ui/widgets/mod.rs", &[]),
 ];
 
-/// The retired per-theme constants (a file that named one theme bypassed the
-/// palette), and the constructors that invent a colour no theme has a token
-/// for.  Both were the same bug: a control drawn with a fixed value instead
-/// of the palette.
-///
-/// `from_black_alpha` is not on the list: the measure window's shadow is
-/// black in both themes, and a tint that follows the palette goes through
+/// Per-theme constants and colour constructors a surface must not name.
+/// `from_black_alpha` stays off this list: the measure window's shadow is
+/// black in both themes, and a palette tint goes through
 /// [`crate::ui::theme::with_alpha`].
 const DARK_ONLY: &[&str] = &[
     "DARK",
@@ -746,10 +670,9 @@ const DARK_ONLY: &[&str] = &[
     "from_hex",
 ];
 
-/// The code part of `line`, without its comments.  `depth` carries an open
-/// `/* … */` across lines, and block comments nest as Rust's do.  String
-/// literals are not lexed, so a `//` inside one ends the line early: that can
-/// hide a name, never invent one.
+/// `line` with comments removed.  `depth` carries an open block comment
+/// across lines.  String literals are not lexed, so a `//` inside one ends
+/// the line early: that can hide a name, never invent one.
 fn code_only(line: &str, depth: &mut usize) -> String {
     let chars: Vec<char> = line.chars().collect();
     let mut out = String::with_capacity(line.len());
@@ -781,9 +704,8 @@ fn code_only(line: &str, depth: &mut usize) -> String {
     out
 }
 
-/// The 1-based lines of `source` that use one of `names`, with the name each
-/// used.  The match is case-sensitive and whole-name: `text` is a field and
-/// `text3` is a token, while `TEXT` is the retired constant.
+/// Case-sensitive, whole name: `text` is a field and `text3` a token,
+/// `TEXT` is the constant.
 fn dark_only_lines<'a>(source: &str, names: &[&'a str]) -> Vec<(usize, &'a str)> {
     let continues = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
     let mut depth = 0;
@@ -847,15 +769,12 @@ fn a_dark_token_scan_is_case_sensitive_and_skips_comments() {
         [(3, "DARK"), (6, "from_rgb")]
     );
 
-    // The other theme's tokens and a raw hex colour are as retired as the
-    // dark ones.
     let light = "let a = LIGHT.bg;\nlet b = Color32::from_hex(\"#ffffff\");\n";
     assert_eq!(
         dark_only_lines(light, DARK_ONLY),
         [(1, "LIGHT"), (2, "from_hex")]
     );
 
-    // A file's own names are checked the same way; the tuner's is the note.
     let note = "    let big = egui::FontId::new(104.0, family);\n";
     assert_eq!(
         dark_only_lines(note, &["FontId::new"]),
@@ -899,10 +818,8 @@ fn every_dark_only_token_matches_a_sample() {
     }
 }
 
-/// The closed per-format enum the host contract replaced must not come back:
-/// each format lives behind `PluginHostUi`, implemented once in its own host
-/// module.  The handle still names the host types for its typed editor and
-/// CLAP accessors, so only the enum is scanned.
+/// Each format lives behind `PluginHostUi`.  The handle still names the
+/// host types for its editor and CLAP accessors, so only the enum is scanned.
 #[test]
 fn the_plugin_handle_has_no_plugin_instance_enum() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/audio/plugins/handle.rs");
@@ -913,9 +830,9 @@ fn the_plugin_handle_has_no_plugin_instance_enum() {
     );
 }
 
-/// The files whose code runs inside an audio callback, where taking a
-/// blocking lock can stall a device.  `audio/clap/host.rs` is here because a
-/// plugin may log from its `process` thread.
+/// Files that run on an audio callback, where a blocking lock can stall a
+/// device.  `audio/clap/host.rs` is here because a plugin may log from its
+/// `process` thread.
 const CALLBACK_FILES: &[&str] = &[
     "src/audio/input.rs",
     "src/audio/output.rs",
@@ -930,8 +847,8 @@ const CALLBACK_FILES: &[&str] = &[
     "src/audio/clap/host.rs",
 ];
 
-/// Constructors that allocate.  `host_log` must not use one: a plugin may
-/// call it from its process thread.
+/// Allocating constructors.  `host_log` must not use one: a plugin may call
+/// it from its process thread.
 const ALLOCATING: &[&str] = &[
     "to_owned",
     "to_string",
@@ -957,8 +874,8 @@ const ALLOCATING: &[&str] = &[
     "cstring(",
 ];
 
-/// The 1-based lines of `source` that call `method` as `.method(`.
-/// `try_lock` is not `.lock`, and a comment is not code.
+/// Lines that call `.method(`.  `try_lock` is not `.lock`, and a comment
+/// is not code.
 fn method_call_lines(source: &str, method: &str) -> Vec<usize> {
     let continues = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
     let mut depth = 0;
@@ -981,8 +898,8 @@ fn method_call_lines(source: &str, method: &str) -> Vec<usize> {
     out
 }
 
-/// The 1-based lines of `source` that use `token`, which must be a whole name
-/// at its start: `to_string` does not match `to_string_lossy`.
+/// Lines that use `token` as a whole name at its start: `to_string` does
+/// not match `to_string_lossy`.
 fn token_lines(source: &str, token: &str) -> Vec<usize> {
     let continues = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
     let ends_in_name = continues(token.chars().next_back());
@@ -1001,9 +918,9 @@ fn token_lines(source: &str, token: &str) -> Vec<usize> {
     out
 }
 
-/// The source from the line that contains `opener` to its matching closing
-/// brace.  Braces are counted in the raw text: a brace inside a string literal
-/// would end the body early, so the pinned functions keep none.
+/// From the line containing `opener` to its matching `}`.  Braces are
+/// counted raw, so a brace in a string would end the body early.  The
+/// pinned functions keep none.
 fn block_body(source: &str, opener: &str) -> Option<String> {
     let mut out = String::new();
     let mut inside = false;
@@ -1028,19 +945,15 @@ fn block_body(source: &str, opener: &str) -> Option<String> {
     (!out.is_empty()).then_some(out)
 }
 
-/// The audio callbacks take no blocking lock, and the CLAP log path
-/// (`host_log` and `impl LogSlot`) allocates nothing: a plugin may call it
-/// from its `process` thread.
+/// A plugin may call the CLAP log path from its `process` thread, so
+/// `host_log` and `impl LogSlot` allocate nothing.
 ///
-/// Locks: `.lock()`, `Mutex::lock(…)`, and `.read()`/`.write()` in a file
-/// that names `RwLock`.  This reads the files as text.  It cannot prove that
-/// a helper they call does not lock or allocate, nor see a lock through a
-/// macro, an alias in another module, or `try_read`/`try_write`.  Comments
-/// are skipped; a string literal is not, so one containing `.lock()` would
-/// fail this test (a false positive, never a missed lock).  `block_body`
-/// counts braces raw for the same reason; the scan checks each body still
-/// reaches its last item, so a brace in a literal fails instead of silently
-/// narrowing what is scanned.
+/// This reads the files as text.  It cannot see a lock or an allocation in
+/// a helper, a macro, an alias, or `try_read`/`try_write`.  Comments are
+/// skipped; a string is not, so `.lock()` in one is a false positive, never
+/// a missed lock.  `block_body` counts braces raw; the scan checks each body
+/// still reaches its last item, so a brace in a literal fails instead of
+/// narrowing the scan.
 #[test]
 fn audio_callbacks_take_no_blocking_lock() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1160,7 +1073,6 @@ fn a_try_lock_is_not_a_blocking_lock() {
     assert!(method_call_lines("let g = lock.try_read();", "read").is_empty());
     assert!(token_lines("let a = text.to_string_lossy();", "to_string").is_empty());
     assert_eq!(token_lines("let a = text.to_owned();", "to_owned"), [1]);
-    // An accumulator the log scan must catch is one of these constructors.
     assert_eq!(
         token_lines("let mut s = String::new();", "String::new"),
         [1]
@@ -1176,9 +1088,8 @@ fn a_try_lock_is_not_a_blocking_lock() {
     assert_eq!(method_call_lines("let s = \"x.lock()\";", "lock"), [1]);
 }
 
-/// The 1-based lines of `source` that read the engine through the field,
-/// `.engine`, rather than a wrapper method (`engine_state`).  Comments are
-/// skipped; a following identifier character means a longer name.
+/// Lines that read `.engine`, not a longer name such as `engine_state`.
+/// Comments are skipped.
 fn engine_references(source: &str) -> Vec<usize> {
     let mut depth = 0;
     let mut out = Vec::new();
@@ -1195,13 +1106,8 @@ fn engine_references(source: &str) -> Vec<usize> {
     out
 }
 
-/// The UI reaches the engine through `RigWerkApp` methods only; no production
-/// file under `src/ui` reads `app.engine` / `self.engine` directly.  `tests.rs`
-/// files are exempt: they may drive the engine to set a fixture.
-///
-/// This reads the source text, so it sees the field access however it is
-/// formatted (`.engine` on its own line included), and it skips comments.  It
-/// does not see an access through another module's helper.
+/// No production file under `src/ui` reads `.engine` directly.  `tests.rs`
+/// is exempt.  This cannot see an access through another module's helper.
 #[test]
 fn the_ui_never_reaches_the_engine_directly() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1239,9 +1145,7 @@ fn the_engine_scan_matches_the_field_not_the_wrapper_names() {
     assert_eq!(engine_references(source), [3, 6]);
 }
 
-/// The `uses:` values in a workflow, with the line each starts on.  A line
-/// whose first non-space character is `#` is prose; a trailing comment is not
-/// part of the value.
+/// A `#` line is prose.  A trailing comment is not part of the value.
 fn action_refs(source: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     for (index, line) in source.lines().enumerate() {
@@ -1260,9 +1164,7 @@ fn action_refs(source: &str) -> Vec<(usize, String)> {
     out
 }
 
-/// Whether `reference` pins a 40-hex commit SHA after its last `@`.  A `./`
-/// action is a path inside this repository, not a ref, so it is pinned by
-/// construction.
+/// A `./` action is a path in this repository, so it is pinned by construction.
 fn action_is_pinned(reference: &str) -> bool {
     if reference.starts_with("./") {
         return true;
@@ -1294,7 +1196,6 @@ fn an_action_ref_is_read_from_its_line() {
     assert!(action_is_pinned("./.github/actions/linux-deps"));
 }
 
-/// Every `.yml` or `.yaml` file under `dir`, recursively.
 fn yaml_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .expect("read the workflow and action directories")
@@ -1315,9 +1216,6 @@ fn yaml_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Every action a workflow or a composite action uses is pinned by commit
-/// SHA, as the header of both workflows says.  The tag or ref may follow in
-/// the trailing comment; an unpinned tag is what this fails on.
 #[test]
 fn every_workflow_action_is_pinned_to_a_commit() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));

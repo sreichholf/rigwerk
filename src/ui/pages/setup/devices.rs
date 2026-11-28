@@ -1,7 +1,5 @@
-//! Input and clock output: the device lists, rate, buffer and driver line.
-//!
-//! Each panel keeps a Search field, pins the In use row above a nested
-//! scroll, and filters Direct / System by label and backend (with `*`).
+//! Device lists for the input and the clock output.  In use stays pinned
+//! above the scroll.  A `*` in the filter is an unanchored glob.
 
 use std::borrow::Cow;
 
@@ -26,12 +24,10 @@ pub(crate) const DEVICE_ROW_H: f32 = 30.0;
 const DEVICE_ROW_GAP: f32 = 2.0;
 /// Direct / System heading plus the gap under it, inside the scroll.
 const DEVICE_HEADING_H: f32 = 18.0;
-/// Visible device rows before the list scrolls.
 pub(crate) const DEVICE_SCROLL_AFTER: usize = 5;
 
-/// Viewport height for more than [`DEVICE_SCROLL_AFTER`] rows.  Fewer rows
-/// are not placed in a scroll area.  `direct` / `system` add room for the
-/// group headings so five device rows stay visible.
+/// Fewer than [`DEVICE_SCROLL_AFTER`] rows are not scrolled.  `direct` and
+/// `system` add room for the headings so five device rows stay visible.
 pub(crate) fn device_list_scroll_height(rows: usize, direct: bool, system: bool) -> Option<f32> {
     if rows <= DEVICE_SCROLL_AFTER {
         return None;
@@ -49,9 +45,8 @@ pub(crate) fn device_list_scroll_height(rows: usize, direct: bool, system: bool)
     Some(height)
 }
 
-/// Case-insensitive match on the device label or backend.  A blank filter
-/// matches all.  With no `*`, the filter is a substring; with `*`, it is an
-/// unanchored glob (`gp*5` matches `Valeton GP-5 USB`).
+/// A blank filter matches all.  With no `*`, the filter is a substring;
+/// with `*`, it is an unanchored glob (`gp*5` matches `Valeton GP-5 USB`).
 pub(crate) fn device_matches_filter(label: &str, backend: &str, filter: &str) -> bool {
     let filter = filter.trim();
     if filter.is_empty() {
@@ -234,9 +229,8 @@ fn device_group_heading(ui: &mut egui::Ui, heading: &str) {
     ui.add_space(2.0);
 }
 
-/// One panel group: every device with its position in the inventory list, and
-/// the group as the peer list `device_choice_label` compares against.  An
-/// inventory list is its own peer list, so only a tab's subset is copied.
+/// The peer list `device_choice_label` compares against.  An inventory list
+/// is its own peer list, so only a tab's subset is copied.
 struct DeviceGroup<'a> {
     rows: Vec<(usize, &'a DeviceItem)>,
     peers: Cow<'a, [DeviceItem]>,
@@ -251,8 +245,8 @@ impl<'a> DeviceGroup<'a> {
         }
     }
 
-    /// The devices at `indices`, which are positions in `devices`.  The rows
-    /// stay borrowed; the peer list is the subset, so it is copied once.
+    /// The rows stay borrowed.  The peer list is the subset, so it
+    /// is copied once.
     fn subset(devices: &'a [DeviceItem], indices: &[usize]) -> Self {
         Self {
             rows: indices
@@ -269,9 +263,8 @@ impl<'a> DeviceGroup<'a> {
     }
 }
 
-/// The group's rows the filter keeps, in list order.  A blank filter passes
-/// every row through before any label is built, so the common case allocates
-/// nothing per device.
+/// A blank filter passes every row through before any label is built, so
+/// the common case allocates nothing per device.
 pub(crate) fn filter_group<'a>(
     devices: &'a [(usize, &'a DeviceItem)],
     peers: &[DeviceItem],
@@ -298,10 +291,6 @@ pub(crate) fn filter_group<'a>(
     shown
 }
 
-/// Search, pinned In use, then filtered Direct / System (nested scroll).
-///
-/// `id_prefix` is `"setup_input"` or `"setup_output"`.  Returns
-/// `(inventory_index, name, from_direct)` when a row is picked.
 fn device_lists(
     ui: &mut egui::Ui,
     filter: &mut String,
@@ -736,7 +725,6 @@ impl RigWerkApp {
     }
 }
 
-/// Why output mode is off for this clock output, or none when it applies.
 pub(super) fn output_mode_reason(device: &DeviceItem) -> Option<&'static str> {
     if device.asio_clsid.is_some() {
         return Some("ASIO uses the driver's own buffer. Output mode does not apply.");

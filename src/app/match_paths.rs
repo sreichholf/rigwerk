@@ -1,17 +1,7 @@
-//! Match paths: one loudness trim per path, measured all at once.
-//!
-//! A path's loudness compared with the other paths is the same on every
-//! output, so the trim lives on the path, not on a path and output pair.
-//! "Match paths" measures every path alone, at the same point its meter
-//! reads (after the post EQ, before the level and the match), then proposes
-//! one trim per path.  Nothing moves until Apply writes them; the mixer
-//! ramps the new gains like a level change.
-//!
-//! Every path is measured, muted or not: the meter sits before the gain the
-//! mute and solo use, so a muted path reads what it would play.  The
-//! reference is either a target LUFS or one path: that path keeps its trim
-//! and the others are matched to it.  Returns follow their senders, so they
-//! are unticked by default; the user can tick them.
+//! The trim lives on the path: the comparison is the same on every
+//! output.  Nothing moves until Apply.  Every path is measured, muted
+//! or not, after the post EQ and before the level.  Returns follow
+//! their senders, so they start unticked.
 
 use serde::{Deserialize, Serialize};
 

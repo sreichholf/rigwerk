@@ -1,20 +1,13 @@
-//! The Linux host run loop (`Steinberg::Linux::IRunLoop`): the timers and
-//! file descriptors plugin editors register, serviced once per UI frame.
+//! Linux `IRunLoop`, one process-wide registry, serviced on the UI
+//! thread.  The host context and every editor frame register into it.
+//! Registration `try_lock`s, so another thread never waits.
 //!
-//! One registry for the process.  The host context and every editor frame
-//! register into it, and [`service_run_loop`] calls the handlers on the UI
-//! thread.  Registration uses `try_lock`, so a plugin that registers from
-//! another thread never waits (a busy lock is refused).  Servicing copies
-//! the due handlers out of the lock before calling them, and checks each
-//! is still registered right before its call, so a handler may register or
-//! unregister any handler (itself included) from inside its callback.
-//!
-//! Each entry remembers which loaded binary its vtable lives in.  A module
-//! that unloads with entries still registered has them released first
-//! ([`forget_module`]), so the registry never calls into unmapped code.
-//! That only catches handlers whose vtable is in the plugin binary itself,
-//! which is where VSTGUI and JUCE put theirs; a handler implemented in
-//! another library the plugin loaded is not purged with it.
+//! Due handlers are copied out of the lock and checked still registered
+//! before the call, so a callback may register or unregister any handler,
+//! itself included.  Each entry records the binary its vtable lives in;
+//! [`forget_module`] releases those before unload.  That only catches a
+//! vtable in the plugin binary (VSTGUI, JUCE), not one in a library the
+//! plugin loaded.
 
 use std::ffi::c_void;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -32,9 +25,8 @@ struct Entry<H: Interface> {
     /// Tells this registration apart from a later one of the same handler.
     serial: u64,
     handler: ComPtr<H>,
-    /// The `IRunLoop` this registration belongs to.  The host context and
-    /// every editor frame are separate run loops; unregistering through one
-    /// must not remove the others' registrations.
+    /// Which `IRunLoop` registered this.  Unregistering through one must
+    /// not remove the others' registrations of the same handler.
     owner: usize,
     /// The load address of the binary holding the handler's vtable.
     module_base: usize,
@@ -105,8 +97,7 @@ unsafe fn entry<H: Interface>(
     }
 }
 
-/// `IRunLoop::registerEventHandler`.  One handler per descriptor per run
-/// loop, as the SDK's editor host allows.
+/// One handler per descriptor per run loop (SDK editor host).
 ///
 /// # Safety
 /// `handler` must be null or a live handler.
@@ -135,12 +126,9 @@ pub(super) unsafe fn register_fd(
     kResultTrue
 }
 
-/// `IRunLoop::unregisterEventHandler`: removes every registration of the
-/// handler on this run loop.  The call names only the handler, not a
-/// descriptor, so a plugin that watched several descriptors unregisters them
-/// all at once (JUCE does exactly that when its editor closes its X11 and
-/// message-loop descriptors).  Another run loop's registration of the same
-/// handler stays: the host context and each editor frame are separate.
+/// The call names only the handler, so every descriptor it watched on
+/// this run loop goes at once (JUCE closes its X11 and message-loop
+/// descriptors that way).  Another run loop's registration stays.
 pub(super) fn unregister_fd(owner: usize, handler: *mut IEventHandler) -> tresult {
     if handler.is_null() {
         return kInvalidArgument;
@@ -163,8 +151,7 @@ pub(super) fn unregister_fd(owner: usize, handler: *mut IEventHandler) -> tresul
     kResultTrue
 }
 
-/// `IRunLoop::registerTimer`.  A zero interval is refused, as the SDK's
-/// editor host does.
+/// A zero interval is refused, as the SDK's editor host does.
 ///
 /// # Safety
 /// `handler` must be null or a live handler.
@@ -194,10 +181,8 @@ pub(super) unsafe fn register_timer(
     kResultTrue
 }
 
-/// `IRunLoop::unregisterTimer`: removes every registration of the handler
-/// on this run loop.  Like [`unregister_fd`], the call names only the
-/// handler; a plugin that registered it more than once expects one call to
-/// remove all of them.
+/// The call names only the handler, so one call drops every registration
+/// of it on this run loop.
 pub(super) fn unregister_timer(owner: usize, handler: *mut ITimerHandler) -> tresult {
     if handler.is_null() {
         return kInvalidArgument;
@@ -220,8 +205,8 @@ pub(super) fn unregister_timer(owner: usize, handler: *mut ITimerHandler) -> tre
     kResultTrue
 }
 
-/// Removes a handler from every run loop.  The reentrant-unregister test's
-/// callback has only the raw pointer, not the run loop it came through.
+/// Every run loop.  The reentrant-unregister test's callback has only
+/// the raw pointer.
 #[cfg(test)]
 pub(super) fn unregister_timer_everywhere(handler: *mut ITimerHandler) -> tresult {
     if handler.is_null() {
@@ -242,8 +227,7 @@ pub(super) fn unregister_timer_everywhere(handler: *mut ITimerHandler) -> tresul
     kResultTrue
 }
 
-/// Calls every due timer once and every handler whose descriptor is ready.
-/// UI thread, once per frame; it never blocks on a descriptor.
+/// UI thread, once per frame.  Never blocks on a descriptor.
 pub(crate) fn service_run_loop() {
     let now = Instant::now();
     let due: Vec<(u64, ComPtr<ITimerHandler>)> = {
@@ -307,9 +291,7 @@ pub(crate) fn service_run_loop() {
     }
 }
 
-/// Releases and removes every entry whose handler lives in the binary
-/// loaded at `base`.  Called while that binary is still mapped, before its
-/// exit function runs.
+/// While the binary at `base` is still mapped, before its exit.
 pub(super) fn forget_module(base: usize) {
     if base == 0 {
         return;
@@ -331,7 +313,6 @@ pub(super) fn forget_module(base: usize) {
     drop(timers);
 }
 
-/// How many fd handlers and timers are registered.
 #[cfg(test)]
 pub(super) fn counts() -> (usize, usize) {
     let registry = registry();
