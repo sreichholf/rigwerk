@@ -141,7 +141,7 @@ fn reset_restores_the_settings_and_keeps_the_state() {
         wet: 0.5,
         delay_ms: 20.0,
         engine: crate::audio::PitchEngine::Spectral,
-        mode: crate::audio::PitchMode::Quality,
+        mode: crate::audio::PitchMode::Sustain,
     };
     assert_eq!(
         reset_pitch(edited),
@@ -297,9 +297,31 @@ fn spectral_swaps_the_delay_for_the_mode_and_back() {
     let latency = format_ms(app.pitch_latency_ms(pitch(&app)));
     assert!(drawn(&tree, &latency), "the mode's latency, {latency}");
 
-    click(&ctx, &mut app, "Quality", body);
-    assert_eq!(pitch(&app).mode, PitchMode::Quality);
+    assert!(drawn(&tree, &super::mode_hint(PitchMode::Balanced)));
+
+    click(&ctx, &mut app, "Sustain", body);
+    let tree = frame(&ctx, &mut app, Vec::new(), body);
+    assert!(
+        drawn(&tree, &super::mode_hint(PitchMode::Sustain)),
+        "what Sustain is for"
+    );
     click(&ctx, &mut app, "Tight", body);
     assert_eq!(super::engine_of(pitch(&app)), PitchEngine::Tight);
-    assert_eq!(pitch(&app).mode, PitchMode::Quality, "the mode is kept");
+    assert_eq!(pitch(&app).mode, PitchMode::Sustain, "the mode is kept");
+}
+
+#[test]
+fn each_mode_card_rates_held_notes_palm_mutes_and_feel() {
+    let ctx = sheet_context();
+    for (index, ratings) in super::MODE_RATINGS.iter().enumerate() {
+        let tree = run_frame(&ctx, test_input(None), |ui| super::mode_tip(ui, index))
+            .platform_output
+            .accesskit_update
+            .expect("accesskit tree");
+        assert!(drawn(&tree, super::MODE_USES[index]), "{index}: the use");
+        for (name, rating) in super::RATING_NAMES.iter().zip(ratings) {
+            assert!(drawn(&tree, name), "{index}: {name}");
+            assert!(drawn(&tree, &format!("{rating} of 5")), "{index}: {name}");
+        }
+    }
 }

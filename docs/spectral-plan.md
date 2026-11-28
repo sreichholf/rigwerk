@@ -36,8 +36,8 @@ overlap-add stays exact whatever sequence of windows the frames used
   (*stops* release 16 → 24 ms in Fast).
 - A switch's own edge is the onset or the drop: the spectral flux tests
   skip a frame whose window differs from the last one's.
-- Sizes: Fast 3072/1536, Balanced 4096/2048.  Quality and Ultra do not
-  switch (see 2).
+- Sizes: Fast 3072/1536, Balanced 4096/2048.  Quality does not switch
+  (see 2).
 
 | Mode (48 kHz) | Pitch p95     | Wobble        | Roughness       | *stops* release | Gate fails |
 |---------------|---------------|---------------|-----------------|-----------------|------------|
@@ -49,17 +49,29 @@ both builds fail.  Memory: 6.2 → 7.7 MB at 192 kHz.
 
 ## 2. Mode sizes
 
-- **Quality.**  Switched at 8192/4096 it holds notes as well as Ultra
-  (pitch 0.3 c, wobble 0.3 c) at 21 ms, but palm-mutes gain pre-echo
-  (*chugs200* −24 → −18 dB) because its own `Ns` of 1024 smears them under
-  either window.  That is a compromise with a clear downside, so it is a
-  setting, not a default: for example a *Sustain* choice on Quality, or
-  Quality keeps its place and the long window becomes what Ultra is.
-  Decide by listening.
-- **Ultrafast (about 5 ms).**  The old 1024/256 Fast was poor (13 gate
-  fails, 37 c wobble).  Switched at 3072/1536 with `Ns` 256 and a hop of 64
-  it scored 2 fails and 9 c wobble with the half-window detector; tune it
-  with the final detector before adding the mode.
+- **Quality and Sustain (done).**  Switched at 8192/4096 Quality holds
+  notes as well as the old 40 ms Ultra (pitch 0.28 c, wobble 0.27 c,
+  7 gate fails each) at 21 ms, but palm-mutes gain pre-echo (*chugs200*
+  −24 → −10 dB): its own `Ns` of 1024 smears them under either window.
+  A compromise with a clear downside, so it is a mode of its own,
+  *Sustain*; Quality is unchanged.  Ultra no longer earned its delay and
+  is gone; a saved `ultra` loads as Sustain.
+- **Three modes (done).**  Against the bench, Fast (8 ms) was no better
+  than Ultrafast (wobble 9.7 against 8.7 c, release 15–17 against
+  10–13 ms), and Quality (21 ms) held notes barely steadier than Balanced
+  (1.7 against 2.2 c) with worse palm-mutes.  The set is Ultrafast,
+  Balanced and Sustain; saved `fast` loads as Ultrafast, `quality` as
+  Balanced, `ultra` as Sustain.
+- **Saying what each mode is for (done).**  Hovering a mode shows a card
+  with its delay, five-dot ratings for held notes, palm-mutes and feel,
+  and its use; the chosen mode's use stays under the controls.
+- **Ultrafast (about 5 ms, done).**  3072/1024 with `Ns` 256 and a hop of
+  64: pitch p95 2.6 c, wobble 8.7 c, roughness 1.07 dB, *stops* release
+  10–13 ms, 2 gate fails (the old 1024/256 Fast: 13 fails, 37 c).  The
+  window choice's newest stretch is `2·Ns` but at least 16 ms: Ultrafast's
+  10.7 ms took a 55 Hz beat's troughs for stops.  Held 4096/2048 steadies
+  notes further (wobble 4.6 c) but releases in 19–22 ms; 2048/1024 does not
+  resolve low power chords.  About 1.5 times Fast's CPU (more frames).
 
 ## 3. Per-bin transient handling (Röbel, DAFx 2003)
 
@@ -73,7 +85,7 @@ attack.  Measure on legato over a held chord.
 
 Window switching costs about 1.7 times the CPU in Fast and Balanced (a
 looped strum on this machine: Fast 2.7 → 4.5 %, Balanced 2.0 → 3.5 % of one
-core; Quality and Ultra unchanged).  `realfft` did not win it back: a
+core; Quality unchanged).  `realfft` did not win it back: a
 profile puts both transforms at about 5 % of the engine's time, so halving
 them saves 2–3 % and 0.6 MB, not worth a dependency.  The time is in the
 per-frame peak work inside `tick` (the lobe fits, the per-bin loops).  If

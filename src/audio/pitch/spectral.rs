@@ -37,11 +37,12 @@ use serde::{Deserialize, Serialize};
 use super::tight::rate_scale;
 
 const MAX_RATE: u32 = 192_000;
-/// The power ratio, either way, between the newest `2·Ns` samples and the
-/// rest of the frame that picks the short window (6 dB).  A shorter stretch
-/// takes a beating chord's trough for a stop; a longer one notices a stop
-/// late.
+/// The power ratio, either way, between the newest stretch of the frame
+/// (`2·Ns`, at least `STEADY_SECONDS`) and the rest that picks the short
+/// window (6 dB).  A shorter stretch takes a beating chord's trough for a
+/// stop; a longer one notices a stop late.
 const SWITCH_POWER: f32 = 4.0;
+const STEADY_SECONDS: f32 = 0.016;
 /// A shift change glides in steps of one hop.
 const GLIDE_SECONDS: f32 = 0.020;
 
@@ -83,19 +84,22 @@ type Complex32 = Complex<f32>;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PitchMode {
-    /// The shortest delay; resolves partials about 31 Hz apart while a note
-    /// holds, 63 Hz around an onset or a stop.
-    Fast,
-    /// The best octave down; resolves partials about 23 Hz apart.
-    Quality,
-    /// About 40 ms, Tight's longest delay; resolves partials about 12 Hz
-    /// apart.
-    Ultra,
-    /// The default; resolves partials about 23 Hz apart while a note holds,
-    /// 47 Hz around an onset or a stop.  Last, because an unknown name reads
-    /// as it.
+    /// About 5 ms; resolves partials about 31 Hz apart while a note holds,
+    /// 94 Hz around an onset or a stop.  An older build's 8 ms `fast` did
+    /// no better.
+    #[serde(alias = "fast")]
+    Ultrafast,
+    /// About 21 ms; resolves partials about 12 Hz apart while a note holds,
+    /// 23 Hz around an onset or a stop.  Palm-mutes smear: its `Ns` is
+    /// long.  An older build's 40 ms `ultra` held notes no better.
+    #[serde(alias = "ultra")]
+    Sustain,
+    /// About 11 ms, the default; resolves partials about 23 Hz apart while
+    /// a note holds, 47 Hz around an onset or a stop.  An older build's
+    /// 21 ms `quality` held notes hardly better and smeared palm-mutes.
+    /// Last, because an unknown name reads as it.
     #[default]
-    #[serde(other)]
+    #[serde(alias = "quality", other)]
     Balanced,
 }
 
@@ -136,31 +140,26 @@ impl Spec {
 }
 
 impl PitchMode {
-    pub const ALL: [PitchMode; 4] = [
-        PitchMode::Fast,
+    pub const ALL: [PitchMode; 3] = [
+        PitchMode::Ultrafast,
         PitchMode::Balanced,
-        PitchMode::Quality,
-        PitchMode::Ultra,
+        PitchMode::Sustain,
     ];
 
     pub(super) fn index(self) -> usize {
         match self {
-            PitchMode::Fast => 0,
+            PitchMode::Ultrafast => 0,
             PitchMode::Balanced => 1,
-            PitchMode::Quality => 2,
-            PitchMode::Ultra => 3,
+            PitchMode::Sustain => 2,
         }
     }
 
-    /// The sizes at 48 kHz: `Na`, the short `Na`, `Ns`, `H`.  Quality and
-    /// Ultra do not switch: under a longer window their long `Ns` smears
-    /// palm-mutes whichever window a frame picks.
+    /// The sizes at 48 kHz: `Na`, the short `Na`, `Ns`, `H`.
     const fn base(self) -> (usize, usize, usize, usize) {
         match self {
-            PitchMode::Fast => (3072, 1536, 384, 96),
+            PitchMode::Ultrafast => (3072, 1024, 256, 64),
             PitchMode::Balanced => (4096, 2048, 512, 128),
-            PitchMode::Quality => (4096, 4096, 1024, 256),
-            PitchMode::Ultra => (8192, 8192, 1920, 480),
+            PitchMode::Sustain => (8192, 4096, 1024, 256),
         }
     }
 
@@ -277,6 +276,8 @@ struct ModeState {
     transient_frames: u32,
     /// After a drop: until the analysis window has moved past it.
     release_frames: u32,
+    /// The newest samples the window choice weighs against the rest.
+    stretch: usize,
     /// The shift in octaves, its target, and the step per hop of a glide.
     octaves: f32,
     octaves_target: f32,
@@ -330,6 +331,7 @@ impl ModeState {
             region_left: 0,
             transient_frames: 1,
             release_frames: 1,
+            stretch: 1,
             octaves: 0.0,
             octaves_target: 0.0,
             octaves_step: 0.0,
@@ -360,6 +362,8 @@ impl ModeState {
         // Until the onset has passed the centre of the synthesis window.
         self.transient_frames = (spec.ns / 2).div_ceil(spec.hop) as u32 + 1;
         self.release_frames = spec.na.div_ceil(spec.hop) as u32;
+        let steady = (STEADY_SECONDS * rate.max(1) as f32) as usize;
+        self.stretch = (2 * spec.ns).max(steady).min(spec.na - spec.short);
         self.trim_coeff = (1.0 / (TRIM_SECONDS * rate.max(1) as f32)).min(1.0);
         self.clear();
     }
@@ -461,7 +465,7 @@ impl ModeState {
         let was_short = self.short;
         let mut rising = false;
         if short < na {
-            let split = na - 2 * ns;
+            let split = na - self.stretch;
             let (mut old, mut new) = (0.0f32, 0.0f32);
             for i in 0..na {
                 let x = self.fifo[start.wrapping_add(i) & fifo_mask];
@@ -471,7 +475,7 @@ impl ModeState {
                     new += x * x;
                 }
             }
-            let (old, new) = (old / split as f32, new / (2 * ns) as f32);
+            let (old, new) = (old / split as f32, new / self.stretch as f32);
             self.short = new > SWITCH_POWER * old || old > SWITCH_POWER * new;
             rising = new > old;
         }
@@ -1163,7 +1167,7 @@ fn windows_for(mode: PitchMode, rate: u32) -> &'static [Windows; 2] {
 /// One full state per mode, so a mode change can warm the new one while the
 /// old one plays, and the FFT scratch they share.
 pub(super) struct SpectralStates {
-    modes: [ModeState; 4],
+    modes: [ModeState; 3],
     scratch: Vec<Complex32>,
 }
 
@@ -1174,7 +1178,7 @@ impl SpectralStates {
             .map(|mode| ModeState::new(mode.spec(MAX_RATE), windows_for(mode, rate), rate));
         let scratch_len = (MIN_FFT_LOG2..=MAX_FFT_LOG2)
             .map(|log2| 1usize << log2)
-            .filter(|&n| n <= PitchMode::Ultra.spec(MAX_RATE).n)
+            .filter(|&n| n <= PitchMode::Sustain.spec(MAX_RATE).n)
             .map(|n| {
                 let pair = fft_pair(n);
                 pair.forward

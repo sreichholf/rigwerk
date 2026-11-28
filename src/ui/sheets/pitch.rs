@@ -13,7 +13,9 @@ use crate::audio::{
 };
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
-use crate::ui::widgets::{segmented_hinted, styled_slider, OutlineButton, SliderStyle, CONTROL_H};
+use crate::ui::widgets::{
+    segmented_hinted, segmented_with_tips, styled_slider, OutlineButton, SliderStyle, CONTROL_H,
+};
 
 const LABEL_W: f32 = 96.0;
 const VALUE_W: f32 = 72.0;
@@ -26,8 +28,6 @@ pub(crate) const RESET_HINT: &str =
 
 pub(crate) const USE_HINT: &str = "Attacks stay intact. Best for single notes and power chords; \
      full chords chorus, less with a longer delay.";
-const SPECTRAL_USE_HINT: &str = "Keeps every chord clean. Attacks soften and arrive a little \
-     later; a longer mode resolves lower notes.";
 
 pub(crate) fn summary(latency: &str) -> String {
     format!("First in the chain · sums a stereo source to mono · the path waits {latency}")
@@ -44,15 +44,22 @@ const ENGINE_HINTS: [&str; 2] = [
     "Tight (default): low latency, attacks intact. Full chords chorus.",
     "Spectral: keeps every chord clean. Its latency is the mode's.",
 ];
-const MODE_HINT: &str = "Spectral's resolution. Longer resolves lower notes and waits longer.";
-const MODE_NAMES: [&str; 4] = ["Fast", "Balanced", "Quality", "Ultra"];
-const MODE_HINTS: [&str; 4] = [
-    "Fast: the shortest delay. Resolves partials about 31 Hz apart on a held note.",
-    "Balanced (default): resolves partials about 23 Hz apart on a held note.",
-    "Quality: the best octave down. Resolves partials about 23 Hz apart.",
-    "Ultra: the longest delay, about 40 ms. Resolves partials about 12 Hz apart; \
-     attacks smear the most.",
+const MODE_HINT: &str = "How long Spectral listens: longer holds low notes steadier, \
+     shorter lets go of notes and palm-mutes sooner.";
+const MODE_NAMES: [&str; 3] = ["Ultrafast", "Balanced", "Sustain"];
+const MODE_DELAYS: [&str; 3] = ["about 5 ms", "about 11 ms (default)", "about 21 ms"];
+const MODE_USES: [&str; 3] = [
+    "The quickest feel and the cleanest stops, for fast riffs and palm-mutes. \
+     Low held notes waver a little.",
+    "Steady low notes and chords with tight palm-mutes. The all-rounder.",
+    "The steadiest held notes and chords, for pads and octave-down drones. \
+     Palm-mutes and fast riffs blur.",
 ];
+/// Out of five, in `RATING_NAMES` order, from the spectral bench
+/// (`docs/spectral-plan.md`): held-note wobble, the release and pre-echo of
+/// stops and chugs, and the delay.
+const MODE_RATINGS: [[u8; 3]; 3] = [[2, 5, 5], [4, 4, 4], [5, 1, 2]];
+const RATING_NAMES: [&str; 3] = ["Held notes", "Palm-mutes", "Quick feel"];
 pub(crate) const DELAY_HINT: &str =
     "Shorter for single notes and power chords: tight and immediate. \
      Longer for full chords: smoother, but you hear every note that much later.";
@@ -81,8 +88,64 @@ pub(crate) fn mode_name(mode: PitchMode) -> &'static str {
     MODE_NAMES[mode_index(mode)]
 }
 
+/// What the mode is for and what it gives up.
+pub(crate) fn mode_hint(mode: PitchMode) -> String {
+    let i = mode_index(mode);
+    format!("{}, {}: {}", MODE_NAMES[i], MODE_DELAYS[i], MODE_USES[i])
+}
+
+/// A mode's hover card: its delay, its ratings and its use.
+fn mode_tip(ui: &mut egui::Ui, index: usize) {
+    let colours = palette(ui.ctx());
+    ui.vertical(|ui| {
+        ui.set_max_width(300.0);
+        ui.label(
+            RichText::new(format!("{} · {}", MODE_NAMES[index], MODE_DELAYS[index]))
+                .font(font(Face::Sans, TypeRole::Control))
+                .color(colours.text),
+        );
+        ui.add_space(4.0);
+        egui::Grid::new(("pitch_mode_ratings", index))
+            .num_columns(2)
+            .spacing([12.0, 4.0])
+            .show(ui, |ui| {
+                for (name, &rating) in RATING_NAMES.iter().zip(&MODE_RATINGS[index]) {
+                    ui.label(
+                        RichText::new(*name)
+                            .font(font(Face::Sans, TypeRole::Secondary))
+                            .color(colours.text2),
+                    );
+                    rating_dots(ui, rating, colours);
+                    ui.end_row();
+                }
+            });
+        ui.add_space(4.0);
+        hint(ui, MODE_USES[index], colours);
+    });
+}
+
+/// `rating` of five dots, filled from the left.
+fn rating_dots(ui: &mut egui::Ui, rating: u8, colours: &Palette) {
+    const STEP: f32 = 11.0;
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(5.0 * STEP, 10.0), egui::Sense::hover());
+    for i in 0..5u8 {
+        let centre = rect.left_center() + Vec2::new(STEP * (f32::from(i) + 0.5), 0.0);
+        if i < rating {
+            ui.painter().circle_filled(centre, 3.5, colours.accent);
+        } else {
+            ui.painter()
+                .circle_stroke(centre, 3.0, egui::Stroke::new(1.0, colours.line2));
+        }
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::Role::Label, true, format!("{rating} of 5"))
+    });
+}
+
 fn mode_index(mode: PitchMode) -> usize {
-    PitchMode::ALL.iter().position(|&m| m == mode).unwrap_or(1)
+    let of = |mode| PitchMode::ALL.iter().position(|&m| m == mode);
+    of(mode).or_else(|| of(PitchMode::default())).unwrap_or(0)
 }
 
 /// The header's three states, in their order.
@@ -231,10 +294,10 @@ impl RigWerkApp {
             controls(ui, &mut pitch, colours, path, &latency);
             ui.add_space(6.0);
             let use_hint = match engine_of(current) {
-                PitchEngine::Tight => USE_HINT,
-                PitchEngine::Spectral => SPECTRAL_USE_HINT,
+                PitchEngine::Tight => USE_HINT.to_owned(),
+                PitchEngine::Spectral => mode_hint(current.mode),
             };
-            hint(ui, use_hint, colours);
+            hint(ui, &use_hint, colours);
         });
 
         if pitch != current {
@@ -424,7 +487,7 @@ fn controls(
     if !tight {
         let mut choice = mode_index(pitch.mode);
         row(ui, "Mode", MODE_HINT, "", colours, |ui, _| {
-            if segmented_hinted(ui, &mut choice, &MODE_NAMES, &MODE_HINTS).changed() {
+            if segmented_with_tips(ui, &mut choice, &MODE_NAMES, &mode_tip).changed() {
                 pitch.mode = PitchMode::ALL[choice];
             }
         });

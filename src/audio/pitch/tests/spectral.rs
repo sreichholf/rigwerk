@@ -35,21 +35,19 @@ fn every_mode_takes_its_sizes_from_the_table() {
         assert_eq!(mode.spec(192_000).short, 4 * base.short);
     }
     // A held note's window is twice an onset's.
-    assert_eq!(PitchMode::Fast.spec(48_000).na, 3072);
-    assert_eq!(PitchMode::Fast.spec(48_000).short, 1536);
+    assert_eq!(PitchMode::Ultrafast.spec(48_000).na, 3072);
+    assert_eq!(PitchMode::Ultrafast.spec(48_000).short, 1024);
     assert_eq!(PitchMode::Balanced.spec(48_000).short, 2048);
-    assert_eq!(PitchMode::Fast.spec(48_000).latency, 383);
+    assert_eq!(PitchMode::Ultrafast.spec(48_000).latency, 255);
     assert_eq!(PitchMode::Balanced.spec(48_000).latency, 511);
-    assert_eq!(PitchMode::Quality.spec(48_000).latency, 1023);
-    // Tight's longest delay.
-    assert_eq!(PitchMode::Ultra.spec(48_000).latency, 1919);
-    assert_eq!(PitchMode::Ultra.spec(192_000).n, 32_768);
+    assert_eq!(PitchMode::Sustain.spec(48_000).latency, 1023);
+    assert_eq!(PitchMode::Sustain.spec(192_000).n, 32_768);
     // The delay is Tight's only.
     let settings = PitchSettings {
         delay_ms: PITCH_MAX_DELAY_MS,
-        ..spectral(PitchMode::Fast, 0)
+        ..spectral(PitchMode::Ultrafast, 0)
     };
-    assert_eq!(pitch_latency_samples(settings, 48_000), 383);
+    assert_eq!(pitch_latency_samples(settings, 48_000), 255);
 }
 
 #[test]
@@ -121,12 +119,12 @@ fn a_sine_lands_on_its_target_in_every_mode() {
 fn resolved_chords_move_every_partial_and_leave_none() {
     let rate = 48_000;
     for (mode, freqs) in [
-        (PitchMode::Fast, vec![300.0, 520.0]),
+        (PitchMode::Ultrafast, vec![300.0, 520.0]),
         // Only a held note's long window resolves these.
-        (PitchMode::Fast, vec![110.0, 165.0, 220.0]),
+        (PitchMode::Ultrafast, vec![110.0, 165.0, 220.0]),
         (PitchMode::Balanced, vec![196.0, 262.0, 330.0]),
         (PitchMode::Balanced, vec![82.41, 123.48, 164.81]),
-        (PitchMode::Quality, vec![82.41, 123.48, 164.81]),
+        (PitchMode::Sustain, vec![82.41, 123.48, 164.81]),
     ] {
         let input: Vec<f32> = (0..(0.8 * rate as f64) as usize)
             .map(|i| {
@@ -273,21 +271,21 @@ fn check_switch(from: PitchSettings, to: PitchSettings) {
 fn a_mode_or_engine_change_dips_without_a_gap_or_a_comb() {
     let off = PitchSettings::default();
     for wet in [1.0, 0.5] {
-        let fast = PitchSettings {
+        let ultrafast = PitchSettings {
             wet,
-            ..spectral(PitchMode::Fast, 0)
+            ..spectral(PitchMode::Ultrafast, 0)
         };
-        let quality = PitchSettings {
+        let sustain = PitchSettings {
             wet,
-            ..spectral(PitchMode::Quality, 0)
+            ..spectral(PitchMode::Sustain, 0)
         };
         let tight = PitchSettings { wet, ..on(0) };
-        check_switch(fast, quality);
-        check_switch(quality, fast);
-        check_switch(tight, quality);
-        check_switch(fast, tight);
-        check_switch(off, fast);
-        check_switch(fast, off);
+        check_switch(ultrafast, sustain);
+        check_switch(sustain, ultrafast);
+        check_switch(tight, sustain);
+        check_switch(ultrafast, tight);
+        check_switch(off, ultrafast);
+        check_switch(ultrafast, off);
     }
 }
 
@@ -350,12 +348,12 @@ fn switching_engines_allocates_and_frees_nothing() {
     let input = signal(48_000, 0.05);
     let mut buf = vec![[0.0f32; 4]; 256];
     let changes = [
-        (spectral(PitchMode::Fast, -5), 48_000),
-        (spectral(PitchMode::Quality, -12), 48_000),
+        (spectral(PitchMode::Ultrafast, -5), 48_000),
+        (spectral(PitchMode::Sustain, -12), 48_000),
         (on(-2), 48_000),
         (spectral(PitchMode::Balanced, 7), 192_000),
-        (spectral(PitchMode::Quality, -2), 192_000),
-        (spectral(PitchMode::Fast, 3), 44_100),
+        (spectral(PitchMode::Sustain, -2), 192_000),
+        (spectral(PitchMode::Ultrafast, 3), 44_100),
         (PitchSettings::default(), 48_000),
     ];
     for (settings, rate) in changes {
@@ -406,7 +404,11 @@ fn a_noise_floor_fits_no_peak_and_a_note_over_it_still_shifts() {
 fn a_held_note_takes_the_long_window_and_an_onset_or_a_stop_the_short() {
     let rate = 48_000;
     let silence = vec![0.0f32; rate as usize / 2];
-    for mode in [PitchMode::Fast, PitchMode::Balanced] {
+    for mode in [
+        PitchMode::Ultrafast,
+        PitchMode::Balanced,
+        PitchMode::Sustain,
+    ] {
         let index = mode.index();
         let mut shifter = PitchShifter::new(rate, 0);
         shifter.update(spectral(mode, -5), rate);
@@ -416,7 +418,9 @@ fn a_held_note_takes_the_long_window_and_an_onset_or_a_stop_the_short() {
         assert!(shifter.spectral.short(index), "{mode:?}: onset");
         drive(&mut shifter, &sine(rate, 82.41, 0.5), 128, |_, _| {});
         assert!(!shifter.spectral.short(index), "{mode:?}: held");
-        drive(&mut shifter, &silence[..rate as usize / 50], 128, |_, _| {});
+        // The window choice weighs the newest 2·Ns, at least 16 ms.
+        let stop = (2 * mode.spec(rate).ns).max(rate as usize / 50);
+        drive(&mut shifter, &silence[..stop], 128, |_, _| {});
         assert!(shifter.spectral.short(index), "{mode:?}: stop");
     }
 }
