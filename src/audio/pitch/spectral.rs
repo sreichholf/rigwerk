@@ -11,6 +11,11 @@
 //! times its measured advance.  The residual moves with its nearest peak
 //! (identity phase locking, Laroche and Dolson).  A frame with an onset or
 //! a sudden drop moves whole regions only, which keeps its time envelope.
+//! An onset restarts the phases of its own peaks only, all in the same
+//! frames, and a string still ringing keeps its phase: Röbel's per-peak
+//! transient processing (DAFx 2003), his energy centre (group delay) beside
+//! a level rise, without his band statistics or his wait for the window
+//! centre (the synthesis window's centre is the reference here).
 //! A slow trim holds the shifted power to the dry input's.  `wa · ws`
 //! overlap-adds to a constant at `H`, so ratio 1 is the input, delayed.
 //!
@@ -66,6 +71,13 @@ const ONSET_FLUX: f32 = 0.25;
 const OFFSET_DROP: f32 = 0.3;
 /// After an onset, how long another cannot reset the phases.
 const ONSET_HOLDOFF_SECONDS: f32 = 0.04;
+/// On an onset frame, a peak is part of the attack when it rose this much
+/// (amplitude, 1.6 dB) over its predecessor, or when its energy centre is
+/// this far (in `Ns`) later than a steady sinusoid's: a chug picked again
+/// before the last one has died away hardly rises.  Restarting a ringing
+/// string's phase dips it by 10–20 dB while the two phases cross-fade.
+const ATTACK_RISE: f32 = 1.2;
+const ATTACK_LATE: f32 = 0.25;
 /// How long the level trim of a shifted output takes to follow.
 const TRIM_SECONDS: f32 = 0.05;
 /// A region scaled back to its analysis energy is never raised more than
@@ -222,6 +234,9 @@ struct Peak {
     /// The residual region's energy and the part of it the target kept.
     energy: f32,
     kept: f32,
+    /// Part of the current onset's attack: its phase restarts while the
+    /// onset's frames last, whether or not it still rises.
+    attack: bool,
     /// A target past Nyquist: neither the sinusoid nor its region is heard.
     dropped: bool,
 }
@@ -247,6 +262,10 @@ struct ModeState {
     synth: Vec<Complex32>,
     prev: Vec<Complex32>,
     power: Vec<f32>,
+    /// Per bin, the time-weighted transform against the plain one,
+    /// `Re(Xt · conj X)`: summed over a peak's region and divided by its
+    /// power, the time centre of its energy (in `Na` from `t_ref`).
+    delay: Vec<f32>,
     /// Scratch for the median of `power`.
     rank: Vec<f32>,
     mag: Vec<f32>,
@@ -267,7 +286,7 @@ struct ModeState {
     /// Frames left before another onset may reset the phases.
     holdoff: u32,
     holdoff_frames: u32,
-    /// Frames left that reset the phases (after an onset), and that shift
+    /// Frames left that reset the attack's phases (after an onset), and that shift
     /// the whole spectrum by regions instead of resynthesising the peaks
     /// (after an onset or a sudden drop), so the frame's time envelope is
     /// kept.
@@ -313,6 +332,7 @@ impl ModeState {
             synth: vec![Complex32::default(); max.n],
             prev: vec![Complex32::default(); half + 1],
             power: vec![0.0; half + 1],
+            delay: vec![0.0; half + 1],
             rank: vec![0.0; half + 1],
             mag: vec![0.0; half + 1],
             prev_mag: vec![0.0; half + 1],
@@ -484,10 +504,13 @@ impl ModeState {
         let switched = self.short != was_short;
         let windows = self.window();
         let mut energy = 0.0f32;
+        // The frame is real, so the imaginary part carries it again under a
+        // time ramp around `t_ref`: one transform gives both spectra.
+        let t_ref = windows.t_ref;
         for (i, (slot, w)) in self.frame[..na].iter_mut().zip(&windows.wa).enumerate() {
             let x = self.fifo[start.wrapping_add(i) & fifo_mask] * w;
             energy += x * x;
-            *slot = Complex32::new(x, 0.0);
+            *slot = Complex32::new(x, x * ((i as f32 - t_ref) / na as f32));
         }
         self.frame[na..n].fill(Complex32::default());
         if energy < SILENCE_RMS * SILENCE_RMS * windows.wa_energy {
@@ -507,7 +530,11 @@ impl ModeState {
         let mut total = 0.0f32;
         let mut prev_total = 0.0f32;
         for k in 0..=half {
-            let x = self.frame[k] * windows.ref_rot[k];
+            let (z, mirror) = (self.frame[k], self.frame[(n - k) % n].conj());
+            let plain = (z + mirror) * 0.5;
+            let timed = (z - mirror) * Complex32::new(0.0, -0.5);
+            self.delay[k] = (timed * plain.conj()).re;
+            let x = plain * windows.ref_rot[k];
             self.frame[k] = x;
             let p = x.norm_sqr();
             let m = p.sqrt();
@@ -781,7 +808,7 @@ impl ModeState {
             // The predecessor: of the last frame's peak whose region held this
             // bin and its neighbours, the nearest, if it was within two bins
             // of `Na`; otherwise the peak starts from its analysis phase.
-            let matched = if reset || !self.have_prev || self.n_prev == 0 {
+            let matched = if !self.have_prev || self.n_prev == 0 {
                 None
             } else {
                 let q = (self.prev_owner[k] as usize).min(self.n_prev - 1);
@@ -791,7 +818,18 @@ impl ModeState {
                     .filter(|p| (p.bin as i64 - k as i64).abs() <= 2 * radius)
                     .copied()
             };
-            let phase = match matched {
+            let late = {
+                let (lo, hi) = (peak.lo as usize, peak.hi as usize);
+                let p: f32 = self.power[lo..=hi].iter().sum();
+                let d: f32 = self.delay[lo..=hi].iter().sum();
+                (d / p.max(f32::MIN_POSITIVE) - windows.cog) * self.spec.na as f32
+            };
+            let attack = reset
+                && (late > ATTACK_LATE * self.spec.ns as f32
+                    || matched.is_none_or(|prev| {
+                        prev.attack || peak.amp.norm() > ATTACK_RISE * prev.amp.norm()
+                    }));
+            let phase = match matched.filter(|_| !attack) {
                 // The sinusoid's own phase advance since the last frame,
                 // unwrapped around the estimate, times the ratio.  It
                 // telescopes over frames, so the output frequency is r times
@@ -806,6 +844,7 @@ impl ModeState {
             let target = ratio * peak.k0;
             let theta = phase - analysis;
             let peak = &mut self.peaks[index];
+            peak.attack = attack;
             peak.analysis = analysis;
             peak.phase = phase;
             peak.target = target;
@@ -976,6 +1015,10 @@ struct Windows {
     /// `Σ wa²` and `Σ wa`.
     wa_energy: f32,
     wa_sum: f32,
+    /// `t_ref` from the frame start, and a steady sinusoid's energy centre
+    /// under `wa` (in `Na` from `t_ref`).
+    t_ref: f32,
+    cog: f32,
     /// `W(δ)`: the transform of `wa`, referenced to `t_ref`, `δ` bins from
     /// its centre, for `δ` in 0 … `lobe_reach` at `LOBE_STEPS` per bin.  A
     /// sinusoid of amplitude `A` and phase `Φ` at `t_ref` puts
@@ -1063,6 +1106,13 @@ impl Windows {
             support,
             wa_energy: wa.iter().map(|w| w * w).sum::<f64>() as f32,
             wa_sum: wa.iter().sum::<f64>() as f32,
+            t_ref: t_ref as f32,
+            cog: (wa
+                .iter()
+                .enumerate()
+                .map(|(i, w)| (i as f64 - t_ref) / na as f64 * w * w)
+                .sum::<f64>()
+                / wa.iter().map(|w| w * w).sum::<f64>()) as f32,
             wa: wa.into_iter().map(|w| w as f32).collect(),
             ws,
             lobe,

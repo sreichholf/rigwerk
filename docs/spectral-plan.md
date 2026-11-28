@@ -73,13 +73,33 @@ both builds fail.  Memory: 6.2 → 7.7 MB at 192 kHz.
   notes further (wobble 4.6 c) but releases in 19–22 ms; 2048/1024 does not
   resolve low power chords.  About 1.5 times Fast's CPU (more frames).
 
-## 3. Per-bin transient handling (Röbel, DAFx 2003)
+## 3. Per-peak transient handling (done)
 
-An onset now resets every phase and moves the whole spectrum by regions,
-so a new note disturbs a string that keeps ringing.  Röbel detects and
-handles transients per bin (from the time centre of gravity of each
-peak's energy), so steady partials stay locked through another note's
-attack.  Measure on legato over a held chord.
+An onset reset every peak's phase, so a note picked over a ringing string
+dipped the string's shifted partials by 8–24 dB in Balanced and Sustain
+while the old and new phases cross-faded (A2 held, F4 picked, −5).  The
+whole-region shifting was harmless; the phase reset alone did it.
+Dropping the reset fixes that but loosens palm-mutes (Balanced *chugs200*
+pre-echo −30 → −19 dB).
+
+Now an onset restarts only its own peaks, all in the onset's frames (the
+set does not shrink, so one attack does not come apart): a peak with no
+predecessor, one risen 1.6 dB over it, or one whose energy centre sits a
+quarter `Ns` later than a steady sinusoid's.  The energy centre is
+Röbel's (DAFx 2003): the time-weighted transform rides in the imaginary
+part of the same complex FFT, so it costs no transform.  His band
+statistics and his wait for the analysis window's centre are left out:
+the global flux test already gates onsets, and here the reference is the
+synthesis window's centre.
+
+- Ringing string: dip ≤ 2.1 dB in every mode (was up to 22.4 dB), now a
+  test.
+- Balanced and Ultrafast: every chug attack and gate row as before.
+- Sustain: *f8chugs* rise 21.4 → 16.4 ms, pre-echo −12.6 → −16.7 dB; two
+  *chugs200* rows slower.
+- Level rise alone missed chugs picked again before the last one died
+  away (Balanced *chugs200* rise 5 → 9 ms); the energy centre alone left
+  Sustain's palm-mutes worse.  Both are kept.
 
 ## 4. Real-input FFT (tried, not taken)
 

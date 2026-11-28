@@ -444,3 +444,60 @@ fn at_zero_semitones_window_switches_still_pass_the_input() {
         assert!(worst < 1e-4, "{mode:?}: reconstruction error {worst}");
     }
 }
+
+/// The held partial's power at `freq` through a Hann of 2048 from `start`.
+fn partial_power(signal: &[f32], rate: u32, freq: f64, start: usize) -> f64 {
+    let n = 2048;
+    let (mut re, mut im) = (0.0, 0.0);
+    for (i, &x) in signal[start..start + n].iter().enumerate() {
+        let w = (std::f64::consts::PI * (i as f64 + 0.5) / n as f64)
+            .sin()
+            .powi(2);
+        let phase = TAU * freq * (start + i) as f64 / rate as f64;
+        re += x as f64 * w * phase.cos();
+        im -= x as f64 * w * phase.sin();
+    }
+    re * re + im * im
+}
+
+/// A note picked over a ringing string restarts its own phases, not the
+/// string's: restarting both dipped the string by 10–20 dB.
+#[test]
+fn a_new_note_leaves_a_ringing_string_alone() {
+    use material::{midi, render, string, Case, Kind};
+    let rate = 48_000;
+    let case = |notes| Case {
+        name: "legato",
+        kind: Kind::Notes,
+        seconds: 1.4,
+        notes,
+        sustain: (0.3, 1.3),
+        signal: None,
+        merge_hz: 0.0,
+    };
+    // A2 rings; F4's partials stay clear of A2's first two.
+    let held = || string(midi(45), 0.05, 0.5, 4.0, 1);
+    let alone = render(&case(vec![held()]), rate, 1.0);
+    let both = render(
+        &case(vec![held(), string(midi(65), 0.8, 0.5, 1.0, 2)]),
+        rate,
+        1.0,
+    );
+    for mode in PitchMode::ALL {
+        let (a, _) = run_settings(&alone, rate, spectral(mode, -5), 0, 256);
+        let (b, _) = run_settings(&both, rate, spectral(mode, -5), 0, 256);
+        for harmonic in [1.0, 2.0] {
+            let freq = 110.0 * harmonic * gate::ratio(-5);
+            let mut worst = 0.0f64;
+            for start in (0.75 * rate as f64) as usize..(1.15 * rate as f64) as usize {
+                if start % 128 != 0 {
+                    continue;
+                }
+                let ratio =
+                    partial_power(&b, rate, freq, start) / partial_power(&a, rate, freq, start);
+                worst = worst.max((10.0 * ratio.log10()).abs());
+            }
+            assert!(worst < 3.0, "{mode:?} harmonic {harmonic}: {worst:.1} dB");
+        }
+    }
+}
