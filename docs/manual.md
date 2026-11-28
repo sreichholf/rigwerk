@@ -146,7 +146,15 @@ and each strip shows a thin meter.
     moves around it between attacks (most on low notes and chords).  A
     drag applies when you let go; each change dips the path for a moment
     and the other paths on its outputs re-align.
-  - *Reset* restores shift, wet and delay; *On* / *Bypass* / *Off* stays.
+  - *Engine*: *Tight* (the default) is the delay-line shifter above.
+    *Spectral* keeps full chords clean; attacks soften and arrive a
+    little later.  Its *Mode* replaces *Delay*: *Fast* (about 8 ms),
+    *Balanced* (about 11 ms, the default), *Quality* (about 21 ms, the
+    best octave down) or *Ultra* (about 40 ms, the lowest notes apart;
+    attacks smear the most).  A longer mode resolves lower notes.  Changing the
+    engine or the mode dips the path like switching on.
+  - *Reset* restores shift, wet, delay, engine and mode; *On* / *Bypass* /
+    *Off* stays.
   - The stage plays (L + R) / 2 on both sides, so a path that carries
     only one side comes out 6 dB quieter.  Both sides are written, so it
     also fills a path side switched off before the chain.

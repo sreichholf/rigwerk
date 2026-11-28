@@ -140,6 +140,8 @@ fn reset_restores_the_settings_and_keeps_the_state() {
         cents: 20.0,
         wet: 0.5,
         delay_ms: 20.0,
+        engine: crate::audio::PitchEngine::Spectral,
+        mode: crate::audio::PitchMode::Quality,
     };
     assert_eq!(
         reset_pitch(edited),
@@ -169,7 +171,7 @@ fn every_control_has_a_name_and_the_sheet_shows_the_latency() {
     assert_eq!(node_named(&tree, "Semitones").value(), Some("0 st"));
     assert_eq!(node_named(&tree, "Wet").value(), Some("100 %"));
     assert_eq!(node_named(&tree, "Delay").value(), Some("4 ms"));
-    let latency = format_ms(app.pitch_latency_ms(pitch(&app).delay_ms));
+    let latency = format_ms(app.pitch_latency_ms(pitch(&app)));
     assert!(
         drawn(&tree, &summary(&latency)),
         "the summary with {latency}"
@@ -275,4 +277,29 @@ fn drawn(tree: &egui::accesskit::TreeUpdate, text: &str) -> bool {
     tree.nodes
         .iter()
         .any(|(_, node)| node.label() == Some(text) || node.value() == Some(text))
+}
+
+#[test]
+fn spectral_swaps_the_delay_for_the_mode_and_back() {
+    use crate::audio::{PitchEngine, PitchMode};
+    let mut app = blank_app();
+    app.open_sheet(Sheet::Pitch { path: 0 });
+    let ctx = sheet_context();
+    let tree = frame(&ctx, &mut app, Vec::new(), body);
+    assert_eq!(node_named(&tree, "Tight").toggled(), Some(Toggled::True));
+    assert!(!drawn(&tree, "Balanced"), "no mode for Tight");
+
+    click(&ctx, &mut app, "Spectral", body);
+    assert_eq!(super::engine_of(pitch(&app)), PitchEngine::Spectral);
+    let tree = frame(&ctx, &mut app, Vec::new(), body);
+    assert!(!drawn(&tree, "Delay"), "no delay for Spectral");
+    assert_eq!(node_named(&tree, "Balanced").toggled(), Some(Toggled::True));
+    let latency = format_ms(app.pitch_latency_ms(pitch(&app)));
+    assert!(drawn(&tree, &latency), "the mode's latency, {latency}");
+
+    click(&ctx, &mut app, "Quality", body);
+    assert_eq!(pitch(&app).mode, PitchMode::Quality);
+    click(&ctx, &mut app, "Tight", body);
+    assert_eq!(super::engine_of(pitch(&app)), PitchEngine::Tight);
+    assert_eq!(pitch(&app).mode, PitchMode::Quality, "the mode is kept");
 }

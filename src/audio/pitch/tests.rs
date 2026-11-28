@@ -5,6 +5,7 @@ mod gate;
 mod harness;
 mod material;
 mod score;
+mod spectral;
 mod tight_state;
 
 use std::f64::consts::TAU;
@@ -100,7 +101,7 @@ fn tight_reports_its_attack_delay_at_every_rate() {
     assert_eq!(spec(384_000, DEFAULT_DELAY_MS).latency, 1_536);
     for rate in RATES {
         assert_eq!(
-            pitch_latency_samples(rate, DEFAULT_DELAY_MS),
+            pitch_latency_samples(PitchSettings::default(), rate),
             spec(rate, DEFAULT_DELAY_MS).latency
         );
     }
@@ -272,18 +273,37 @@ fn the_default_is_off_and_fully_wet() {
 }
 
 #[test]
-fn an_old_save_with_an_engine_or_a_mode_reads_its_other_fields() {
-    for text in [
-        "(enabled: true, semitones: -2, engine: spectral, mode: quality)",
-        "(enabled: true, semitones: -2, engine: tight, mode: fast)",
-        "(enabled: true, semitones: -2, mode: balanced)",
-        "(enabled: true, semitones: -2, engine: granular)",
+fn the_engine_and_mode_read_back_and_unknown_names_read_as_the_defaults() {
+    let spectral = |mode| PitchSettings {
+        engine: PitchEngine::Spectral,
+        mode,
+        ..on(-2)
+    };
+    for (text, want) in [
+        (
+            "(enabled: true, semitones: -2, engine: spectral, mode: quality)",
+            spectral(PitchMode::Quality),
+        ),
+        (
+            "(enabled: true, semitones: -2, engine: tight, mode: fast)",
+            PitchSettings {
+                mode: PitchMode::Fast,
+                ..on(-2)
+            },
+        ),
+        ("(enabled: true, semitones: -2, mode: balanced)", on(-2)),
+        ("(enabled: true, semitones: -2, engine: granular)", on(-2)),
+        (
+            "(enabled: true, semitones: -2, engine: spectral, mode: mega)",
+            spectral(PitchMode::Balanced),
+        ),
     ] {
         let s: PitchSettings = ron::from_str(text).expect(text);
-        assert_eq!(s, on(-2), "{text}");
+        assert_eq!(s, want, "{text}");
     }
-    let text = ron::to_string(&on(-2)).expect("RON");
-    assert!(!text.contains("engine") && !text.contains("mode"), "{text}");
+    let saved = spectral(PitchMode::Fast);
+    let text = ron::to_string(&saved).expect("RON");
+    assert_eq!(ron::from_str::<PitchSettings>(&text).expect(&text), saved);
 }
 
 #[test]
@@ -304,6 +324,8 @@ fn sanitized_clamps_every_field() {
         cents: f32::NAN,
         wet: 3.0,
         delay_ms: f32::NAN,
+        engine: PitchEngine::Spectral,
+        mode: PitchMode::Quality,
     }
     .sanitized();
     assert_eq!(wild.semitones, PITCH_MAX_SEMITONES);
@@ -551,7 +573,15 @@ fn a_delay_change_fades_out_then_in_with_the_new_latency() {
     let block = 256;
     let input = sine(rate, 220.0, 1.0);
     let at = |delay_ms| PitchSettings { delay_ms, ..on(0) };
-    let latency = |delay_ms| pitch_latency_samples(rate, delay_ms);
+    let latency = |delay_ms| {
+        pitch_latency_samples(
+            PitchSettings {
+                delay_ms,
+                ..PitchSettings::default()
+            },
+            rate,
+        )
+    };
     let (short, long) = (latency(4.0), latency(PITCH_MAX_DELAY_MS));
     let mut shifter = PitchShifter::new(rate, 0);
     shifter.update(at(4.0), rate);
@@ -617,7 +647,7 @@ fn switching_off_while_a_delay_change_lands_fades_the_dry_back_in() {
             );
         }
     });
-    let start = pitch_latency_samples(rate, DEFAULT_DELAY_MS) as usize + 1;
+    let start = pitch_latency_samples(PitchSettings::default(), rate) as usize + 1;
     let step = out[start..]
         .windows(2)
         .map(|pair| (pair[1] - pair[0]).abs())
@@ -706,11 +736,13 @@ fn processing_allocates_and_frees_nothing() {
 fn the_preallocation_stays_within_its_budget() {
     let shifter = PitchShifter::new(48_000, 0);
     let kb = shifter.tight.bytes() as f64 / 1e3;
-    println!("one shifter preallocates {kb:.1} kB");
+    let mb = (shifter.tight.bytes() + shifter.spectral.bytes()) as f64 / 1e6;
+    println!("one shifter preallocates {mb:.2} MB, Tight {kb:.1} kB");
+    assert!((130.0..150.0).contains(&kb), "Tight {kb:.1} kB");
     // The module docs quote this figure.
     assert!(
-        (130.0..150.0).contains(&kb),
-        "{kb:.1} kB; update the //! of pitch.rs"
+        (5.9..6.6).contains(&mb),
+        "{mb:.2} MB; update the //! of pitch.rs"
     );
 }
 

@@ -851,12 +851,12 @@ impl RigWerkApp {
         self.path_mut().mix.pitch = pitch.sanitized();
     }
 
-    /// What the pitch shifter at `delay_ms` delays a path by while on, ms,
+    /// What the pitch shifter with `pitch` delays a path by while on, ms,
     /// at the rate the output opened (the configured one before it opens).
     /// The DSP's own figure, so it can be shown while the stage is off.
-    pub(crate) fn pitch_latency_ms(&self, delay_ms: f32) -> f32 {
+    pub(crate) fn pitch_latency_ms(&self, pitch: crate::audio::PitchSettings) -> f32 {
         let rate = self.display_rate();
-        crate::audio::pitch_latency_samples(rate, delay_ms) as f32 * 1000.0 / rate as f32
+        crate::audio::pitch_latency_samples(pitch, rate) as f32 * 1000.0 / rate as f32
     }
 
     /// The rate latencies are shown at: the one the output opened, else

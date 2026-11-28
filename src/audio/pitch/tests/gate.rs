@@ -109,14 +109,23 @@ pub(super) fn run_delay(
     slot: usize,
     block: usize,
 ) -> (Vec<f32>, u32) {
+    let settings = PitchSettings {
+        delay_ms,
+        ..on(semitones)
+    };
+    run_settings(input, rate, settings, slot, block)
+}
+
+/// [`run`] with any settings.
+pub(super) fn run_settings(
+    input: &[f32],
+    rate: u32,
+    settings: PitchSettings,
+    slot: usize,
+    block: usize,
+) -> (Vec<f32>, u32) {
     let mut shifter = PitchShifter::new(rate, slot);
-    shifter.update(
-        PitchSettings {
-            delay_ms,
-            ..on(semitones)
-        },
-        rate,
-    );
+    shifter.update(settings, rate);
     let latency = shifter.latency_samples();
     let total = input.len() + latency as usize;
     let mut out = Vec::with_capacity(total);

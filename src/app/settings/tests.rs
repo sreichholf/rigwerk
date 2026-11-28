@@ -2604,7 +2604,7 @@ fn pitch_missing_from_old_saves_is_off_and_an_unset_one_is_not_written() {
 }
 
 #[test]
-fn pitch_with_an_engine_or_a_mode_from_an_old_save_loads() {
+fn pitch_engine_and_mode_load_from_a_save() {
     let raw = r#"(
             paths:[
                 (name:"A",pitch:(enabled:true,semitones:-2,engine:spectral,mode:quality)),
@@ -2616,25 +2616,36 @@ fn pitch_with_an_engine_or_a_mode_from_an_old_save_loads() {
     let loaded = load_preferences(Some(raw), BACKUP);
     assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
     let preferences = loaded.preferences.expect("readable");
-    let pitch = |enabled, bypass, semitones, cents, wet| crate::audio::PitchSettings {
-        enabled,
-        bypass,
-        semitones,
-        cents,
-        wet,
-        delay_ms: 4.0,
-    };
+    use crate::audio::{PitchEngine, PitchMode};
+    let pitch =
+        |enabled, bypass, semitones, cents, wet, engine, mode| crate::audio::PitchSettings {
+            enabled,
+            bypass,
+            semitones,
+            cents,
+            wet,
+            delay_ms: 4.0,
+            engine,
+            mode,
+        };
+    let (spectral, tight) = (PitchEngine::Spectral, PitchEngine::Tight);
     let names: Vec<&str> = preferences.paths.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, ["A", "B", "C"]);
-    assert_eq!(preferences.paths[0].pitch, pitch(true, false, -2, 0.0, 1.0));
-    assert_eq!(preferences.paths[1].pitch, pitch(true, true, 0, 10.0, 1.0));
+    assert_eq!(
+        preferences.paths[0].pitch,
+        pitch(true, false, -2, 0.0, 1.0, spectral, PitchMode::Quality)
+    );
+    assert_eq!(
+        preferences.paths[1].pitch,
+        pitch(true, true, 0, 10.0, 1.0, tight, PitchMode::Fast)
+    );
     assert_eq!(
         preferences.paths[2].pitch,
-        pitch(false, false, -7, 0.0, 0.5)
+        pitch(false, false, -7, 0.0, 0.5, tight, PitchMode::Balanced)
     );
     assert_eq!(
         preferences.sessions[0].paths[0].pitch,
-        pitch(true, false, -5, 0.0, 1.0)
+        pitch(true, false, -5, 0.0, 1.0, spectral, PitchMode::Balanced)
     );
 }
 
