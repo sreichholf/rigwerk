@@ -587,8 +587,9 @@ notes and power chords, longer for full chords); the latency in ms at the
 shown rate in the summary line, and what the shifter is for (attacks
 intact, best for single notes and power chords; full chords chorus, less
 with a longer delay); *Engine* *Tight* / *Spectral* (default *Tight*);
-for *Spectral*, *Mode* *Fast* / *Balanced* / *Quality* / *Ultra* (default
-*Balanced*) in place of *Delay*, the latency beside *Engine*;
+for *Spectral*, *Mode* *Ultrafast* / *Balanced* / *Sustain* (default
+*Balanced*; hovering one shows its held-notes, palm-mutes and feel
+ratings; the chosen mode's use under the controls) in place of *Delay*, the latency beside *Engine*;
 *Reset* (shift, wet, delay, engine and mode; keeps *On* / *Bypass* /
 *Off*).  An engine or mode change dips like switching on.  Not
 on a return: a path that becomes one closes the sheet.

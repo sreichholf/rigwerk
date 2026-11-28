@@ -148,11 +148,19 @@ and each strip shows a thin meter.
     and the other paths on its outputs re-align.
   - *Engine*: *Tight* (the default) is the delay-line shifter above.
     *Spectral* keeps full chords clean; attacks soften and arrive a
-    little later.  Its *Mode* replaces *Delay*: *Fast* (about 8 ms),
-    *Balanced* (about 11 ms, the default), *Quality* (about 21 ms, the
-    best octave down) or *Ultra* (about 40 ms, the lowest notes apart;
-    attacks smear the most).  A longer mode resolves lower notes.  Changing the
-    engine or the mode dips the path like switching on.
+    little later.  Its *Mode* replaces *Delay*:
+    - *Ultrafast* (about 5 ms): the quickest feel and the cleanest stops,
+      for fast riffs and palm-mutes; low held notes waver a little.
+    - *Balanced* (about 11 ms, the default): steady low notes and chords
+      with tight palm-mutes.
+    - *Sustain* (about 21 ms): the steadiest held notes and chords, for
+      pads and octave-down drones; palm-mutes and fast riffs blur.
+
+    Hovering a mode shows how it rates on held notes, palm-mutes and
+    feel; the chosen mode's use stays under the controls.  A save from an
+    older build loads *Fast* as *Ultrafast*, *Quality* as *Balanced* and
+    *Ultra* as *Sustain*.  Changing the engine or the mode dips the path
+    like switching on.
   - *Reset* restores shift, wet, delay, engine and mode; *On* / *Bypass* /
     *Off* stays.
   - The stage plays (L + R) / 2 on both sides, so a path that carries

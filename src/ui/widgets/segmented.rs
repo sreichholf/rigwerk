@@ -16,7 +16,7 @@ pub(crate) fn segmented(
     selected: &mut usize,
     options: &[&str],
 ) -> egui::Response {
-    paint(ui, selected, options, &[])
+    paint(ui, selected, options, Hover::Text(&[]))
 }
 
 /// [`segmented`] with a hover text per option; an option without one is
@@ -27,14 +27,29 @@ pub(crate) fn segmented_hinted(
     options: &[&str],
     hints: &[&str],
 ) -> egui::Response {
-    paint(ui, selected, options, hints)
+    paint(ui, selected, options, Hover::Text(hints))
+}
+
+/// [`segmented`] whose hover card `tip` draws for the option's index.
+pub(crate) fn segmented_with_tips(
+    ui: &mut egui::Ui,
+    selected: &mut usize,
+    options: &[&str],
+    tip: &dyn Fn(&mut egui::Ui, usize),
+) -> egui::Response {
+    paint(ui, selected, options, Hover::Card(tip))
+}
+
+enum Hover<'a> {
+    Text(&'a [&'a str]),
+    Card(&'a dyn Fn(&mut egui::Ui, usize)),
 }
 
 fn paint(
     ui: &mut egui::Ui,
     selected: &mut usize,
     options: &[&str],
-    hints: &[&str],
+    hover: Hover<'_>,
 ) -> egui::Response {
     if options.is_empty() {
         return ui.allocate_response(Vec2::ZERO, Sense::hover());
@@ -111,7 +126,10 @@ fn paint(
             None,
         );
         palette_focus(ui, &response, segment);
-        response = response.on_hover_text(hint(hints, index, option));
+        response = match hover {
+            Hover::Text(hints) => response.on_hover_text(hint(hints, index, option)),
+            Hover::Card(tip) => response.on_hover_ui(|ui| tip(ui, index)),
+        };
         combined = Some(match combined {
             Some(previous) => previous.union(response),
             None => response,

@@ -281,18 +281,31 @@ fn the_engine_and_mode_read_back_and_unknown_names_read_as_the_defaults() {
     };
     for (text, want) in [
         (
+            "(enabled: true, semitones: -2, engine: spectral, mode: sustain)",
+            spectral(PitchMode::Sustain),
+        ),
+        // Older builds' modes.
+        (
             "(enabled: true, semitones: -2, engine: spectral, mode: quality)",
-            spectral(PitchMode::Quality),
+            spectral(PitchMode::Balanced),
         ),
         (
-            "(enabled: true, semitones: -2, engine: tight, mode: fast)",
+            "(enabled: true, semitones: -2, engine: spectral, mode: fast)",
+            spectral(PitchMode::Ultrafast),
+        ),
+        (
+            "(enabled: true, semitones: -2, engine: tight, mode: ultrafast)",
             PitchSettings {
-                mode: PitchMode::Fast,
+                mode: PitchMode::Ultrafast,
                 ..on(-2)
             },
         ),
         ("(enabled: true, semitones: -2, mode: balanced)", on(-2)),
         ("(enabled: true, semitones: -2, engine: granular)", on(-2)),
+        (
+            "(enabled: true, semitones: -2, engine: spectral, mode: ultra)",
+            spectral(PitchMode::Sustain),
+        ),
         (
             "(enabled: true, semitones: -2, engine: spectral, mode: mega)",
             spectral(PitchMode::Balanced),
@@ -301,7 +314,7 @@ fn the_engine_and_mode_read_back_and_unknown_names_read_as_the_defaults() {
         let s: PitchSettings = ron::from_str(text).expect(text);
         assert_eq!(s, want, "{text}");
     }
-    let saved = spectral(PitchMode::Fast);
+    let saved = spectral(PitchMode::Ultrafast);
     let text = ron::to_string(&saved).expect("RON");
     assert_eq!(ron::from_str::<PitchSettings>(&text).expect(&text), saved);
 }
@@ -325,7 +338,7 @@ fn sanitized_clamps_every_field() {
         wet: 3.0,
         delay_ms: f32::NAN,
         engine: PitchEngine::Spectral,
-        mode: PitchMode::Quality,
+        mode: PitchMode::Sustain,
     }
     .sanitized();
     assert_eq!(wild.semitones, PITCH_MAX_SEMITONES);

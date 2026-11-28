@@ -24,7 +24,7 @@ pub(crate) use dot::path_dot;
 pub(crate) use fader::{fader, fader_height, FaderRange};
 pub(crate) use meter::{horizontal_meter, vertical_meter, MeterChannel};
 pub(crate) use popover::popover;
-pub(crate) use segmented::{segmented, segmented_hinted};
+pub(crate) use segmented::{segmented, segmented_hinted, segmented_with_tips};
 
 pub(crate) use slider::{row_info, styled_slider, SliderStyle};
 pub(crate) use text_field::TextField;

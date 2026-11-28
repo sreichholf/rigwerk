@@ -2633,11 +2633,11 @@ fn pitch_engine_and_mode_load_from_a_save() {
     assert_eq!(names, ["A", "B", "C"]);
     assert_eq!(
         preferences.paths[0].pitch,
-        pitch(true, false, -2, 0.0, 1.0, spectral, PitchMode::Quality)
+        pitch(true, false, -2, 0.0, 1.0, spectral, PitchMode::Balanced)
     );
     assert_eq!(
         preferences.paths[1].pitch,
-        pitch(true, true, 0, 10.0, 1.0, tight, PitchMode::Fast)
+        pitch(true, true, 0, 10.0, 1.0, tight, PitchMode::Ultrafast)
     );
     assert_eq!(
         preferences.paths[2].pitch,
