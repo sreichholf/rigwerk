@@ -77,15 +77,13 @@ reads.
 | **Source** | Which input channels feed a path, and whether it is *Stereo* or *Mono*. | routes, layer 1, mono sum |
 | **Path outputs** | Whether a path's L and R play at all (*L*, *R*), before any output. | OUT 1 / OUT 2 (for this) |
 | **Chain** | A path's stages, in the order the sound passes them. | signal chain, rack |
-| **Stage** | One step of a chain: *Pitch*, *Pre EQ*, *Amp*, an effect, *Cab*, *Gate*, *Post EQ*. | slot, block |
-| **Pitch** | The built-in pitch shifter, first in a path's chain; a return has none.  *On*, *Bypass* or *Off*: off takes it and its latency out of the chain.  Low latency, for single notes and power chords; full chords chorus. | harmonizer, Mix (for its wet) |
-| **Delay** | *Pitch*'s reported latency and the wait it plays at, 4–40 ms: shorter for single notes and power chords, longer for full chords (the splices sit further apart).  The read delay still moves around it.  Not an echo. | splice, lookahead |
+| **Stage** | One step of a chain: *Pre EQ*, *Amp*, an effect, *Cab*, *Gate*, *Post EQ*. | slot, block |
 | **Effect** | A VST3 or CLAP plugin placed in a chain. | insert, plug |
 | **Plugin** | The installed VST3 or CLAP file: the format, the scan, the plugin's own window. | (kept) |
 | **Editor** | The window a plugin draws itself. | plugin interface, own editor |
 | **Controls** | RigWerk's list of an effect's parameters. | parameters, plugin controls |
-| **Wet** | How much of an effect's or the pitch shifter's output is mixed with the dry signal, 0–100 %. | mix (for an effect) |
-| **Bypass** | A stage in use passes the sound unchanged and keeps its latency.  *Bypass all* does that for every effect on a path.  *Pitch* off is not bypassed: it has no latency. | BYP, FX |
+| **Wet** | How much of an effect's output is mixed with the dry signal, 0–100 %. | mix (for an effect) |
+| **Bypass** | A stage passes the sound unchanged and keeps its latency.  *Bypass all* does that for every effect on a path. | BYP, FX |
 | **Master** | The sum of all paths, with one level and one mute, before the outputs. | Output stage, MIX, master mix |
 | **Level** | A fader's value in dB: path, master, output, and a path's level on one output. | volume, LEVEL HERE |
 | **Channel map** | Which path channels play on which output channels. | routing (noun), layer 2, map |
@@ -294,10 +292,9 @@ on paths), so the faders line up across the screen.
 - *Source* button: `In 1 · mono`.  It opens the source popover: a 2 × 2
   grid (In 1, In 2 → L, R) and *Stereo* / *Mono*.  When the path outputs
   are not both on, the button adds `· L only` or `· R only`.
-- The chain (§4.2), in signal order: *Pitch* (not on a return), *Pre EQ*,
-  *Gate* when it sits before the effects, *Amp* when it sits before the
-  effects, the effects group, *Amp* when after, *Cab*, *Gate* when after,
-  *Post EQ*.
+- The chain (§4.2), in signal order: *Pre EQ*, *Gate* when it sits before
+  the effects, *Amp* when it sits before the effects, the effects group,
+  *Amp* when after, *Cab*, *Gate* when after, *Post EQ*.
 - The chain's latency and the path's DSP load.  The DSP alarm is raised on
   the total (as today, `app::issues`); the strip of the path with the
   largest share carries its marker.
@@ -433,17 +430,15 @@ Right: time and preferences.
 ### 4.2 Chain rows
 
 - 28 pt high, 3 pt corners, `slot` fill.  An LED dot (filled: on; ring:
-  bypassed, or off for *Pitch*), the name, then a mini curve (EQ), the
-  threshold (Gate), the shift (*Pitch*: `−2 st`, `−1.95 st` with cents,
-  *Bypass*, *Off*) or the latency (effect).
+  bypassed), the name, then a mini curve (EQ), the threshold (Gate) or the
+  latency (effect).
 - Selected: accent outline and `accent_bg`.  Failed to load: the name in
   `error_text` with an icon, *Didn't load* and the reason on hover.  Paused
   while restarting: a pause glyph.
-- Click selects and opens its sheet.  Click the LED to bypass; on the
-  *Pitch* row it switches the stage on or off (its bypass is in the sheet).
+- Click selects and opens its sheet.  Click the LED to bypass.
   Double-click an effect opens its editor or its controls (Setup).
   Right-click: *Editor*, *Controls*, *Bypass*, *Move up*, *Move down*,
-  *Remove*; on the *Pitch* row, *Turn on* or *Turn off*.
+  *Remove*.
 - Drag a row to reorder inside its chain; the list scrolls at its edges.
   Alt+↑/↓ moves the focused row.  Moving an effect closes its open editor,
   as `move_plugin` does today; the hover on the drag handle says so.
@@ -539,13 +534,10 @@ table.
 
 ### 5.3 Chain height: 32 effects
 
-- *Pitch* (on or off, like *Pre EQ*; absent on a return), *Pre EQ*,
-  either *Gate*, the NAM rows, *Cab* and *Post EQ* are pinned; only the
-  effects group scrolls.
-- The group gets the height left after the fixed rows and the fader.  With
-  the default chain (one NAM row, the gate after the effects) that is four
-  rows at 1440 × 900; at 1040 × 700 the pinned rows already fill the strip,
-  so the group keeps its floor of one row.
+- *Pre EQ*, either *Gate* and *Post EQ* are pinned; only the effects group
+  scrolls.
+- The group gets the height left after the fixed rows and the fader: six
+  rows at 1440 × 900, three at 1040 × 700.
 - On overflow: a 3 pt scroll thumb, a fade at the bottom edge, *n more ·
   scroll* in the fade.  The wheel scrolls the group, not the console.
 - The selected effect, and one being dragged, stays in view.
@@ -577,18 +569,6 @@ pre and post EQ are for, shelf vs bell Q) stay.
 its value and today's hover text; a reduction meter (audio addition, §0);
 *Before effects* / *After effects*; *Listens to*: *Gated signal* /
 *Dry input*; *Reset* (keeps on/off).
-
-**Pitch**: header *On* / *Bypass* / *Off* (off takes the stage and its
-latency out of the chain; bypass plays the dry signal at the same delay, so
-the alignment does not move); *Semitones* (−12 to +12, a track with − and
-+), *Cents* (−50 to +50), *Wet* (default 100 %), *Delay* (4–40 ms in
-1 ms steps, default 4 ms, shown as `4 ms`; its hover: shorter for single
-notes and power chords, longer for full chords); the latency in ms at the
-shown rate in the summary line, and what the shifter is for (attacks
-intact, best for single notes and power chords; full chords chorus, less
-with a longer delay); *Reset* (shift, wet and delay; keeps *On* /
-*Bypass* / *Off*).  Not
-on a return: a path that becomes one closes the sheet.
 
 **Effect**: header *On* / *Bypass*, *Wet* (its default on hover), latency,
 state (*Not loaded*, *Active*, *Bypassed*, *Didn't load*: today's
@@ -979,7 +959,7 @@ src/ui/
   pages/console.rs (+ console/: input, path, master, output, chain, density)
   pages/tuner.rs   (keeps gauge.rs, rows.rs)
   pages/setup.rs   (+ setup/: devices, latency, clock, appearance, help)
-  sheets/          pitch, eq, gate, effect, path, output, scope, diagnostics
+  sheets/          eq, gate, effect, path, output, scope, diagnostics
   drawers/         browser, issues
   widgets/         fader, meter, chain_row, segmented, chip, dot, popover
 ```
@@ -997,9 +977,9 @@ src/ui/
 The test moves below are history; the screenshot flags are live.
 
 - `RIGWERK_PAGE` takes `console`, `tuner`, `setup`.  `RIGWERK_SHEET`
-  (`pitch`, `eq`, `gate`, `nam`, `cab`, `effect`, `path`, `output`,
-  `match-paths`, `scope`, `diagnostics`) and `RIGWERK_DRAWER` (`browser`,
-  `issues`) replace `RIGWERK_MIXER_STAGE`.
+  (`eq`, `gate`, `nam`, `cab`, `effect`, `path`, `output`, `match-paths`,
+  `scope`, `diagnostics`) and `RIGWERK_DRAWER` (`browser`, `issues`) replace
+  `RIGWERK_MIXER_STAGE`.
   `RIGWERK_THEME` (`dark`, `light`) overrides the preference.
   `RIGWERK_SCREENSHOT_SIZE=<w>x<h>` *(new)* replaces the fixed 1440 × 1080
   (`app/screenshot.rs`).

@@ -1,10 +1,71 @@
-//! Fixed path slots.  Adding one never allocates on the callback, and a
-//! slot keeps its index, so removing a path does not move the others.
+//! One signal path's controls, as the UI writes them and the audio
+//! callback reads them: input routing, mono, channel enable, the two
+//! built-in EQs, the gate, the NAM blocks, the plugin effect chain, the
+//! cabinet and the path meters.
 //!
-//! The audio side `try_lock`s the EQ, gate, pitch, NAM and cabinet.  A
-//! busy lock keeps the last settings.  Sends are taken after level and
-//! match.  A return does not send.  Chain latency always counts, including
-//! a bypassed effect; the cabinet adds none.
+//! [`Shared`](super::shared::Shared) holds [`MAX_PATHS`] of these as fixed
+//! slots, all preallocated, so adding a path never allocates in a callback.
+//! Each slot has a [`PathState`]; a slot keeps its index for its whole life,
+//! so removing one path never moves the chains of the others, and a removed
+//! path can keep running while it fades out.  Every path splits off where
+//! the chain starts, after the clock side (ring, resampler, drift); see
+//! `mixer::PathProcessor` for the realtime half.
+//!
+//! # Lifecycle
+//!
+//! Paths are added, duplicated and removed live, from the UI thread, without
+//! restarting the bridge ([`Shared`](super::shared::Shared)`::add_path`,
+//! `duplicate_path`, `remove_path`):
+//! - add and duplicate take a free ([`PathState::Inactive`]) slot, set it up
+//!   while the mixer still skips it, then make it active.  That bumps the
+//!   slot's generation, so the mixer starts its chain fresh, fading the
+//!   path in.  Both start muted, so the sum never jumps, and the mixer
+//!   keeps a path silent while its restored plugins are not open yet.
+//! - remove moves the slot to [`PathState::FadingOut`].  The mixer keeps
+//!   running it with its path gain ramping to silence and then moves it to
+//!   [`PathState::Inactive`] itself (one compare-exchange, from the audio
+//!   thread).  With no bridge running, the UI thread finishes the removal
+//!   (`Shared::service_paths`), and releases the slot's plugins.
+//! - at least one path is always active.
+//!
+//! # Level, mute, solo, match
+//!
+//! Each path has a level (dB), a loudness-match trim (dB), a mute and a
+//! solo, applied after its chain and before the master, as one ramped gain.
+//! The match trim makes paths switch at the same loudness; it is one value
+//! per path, so every output plays the same balance.  Sends are taken after
+//! the level and the match, so a return follows them.  If any active path
+//! is soloed, only soloed paths sound.  A return is solo-safe: it keeps
+//! sounding, and only hears the senders that still sound.
+//!
+//! # Returns
+//!
+//! A path fed by [`PathFeed::Sends`] is a return: its chain runs on the sum
+//! of the other paths' sends instead of the input, so one reverb or delay
+//! serves every path, and the return still has its own map, level and
+//! timing on each output.  Every path fed by the input has one send level
+//! per slot ([`PathMix::sends`]), taken after its level, mute and solo.
+//! A return does not send, so nothing loops.  The mixer lines the sends up
+//! with each other and counts the return's latency as the slowest live
+//! path fed by the input plus its own chain's (`mixer`, "Returns").
+//!
+//! # Latency
+//!
+//! [`PathControls::latency_samples`] is the chain's total plugin latency,
+//! and the chain really delays by exactly that much at all times: an
+//! effect skipped for a block plays its input delayed by its latency, and
+//! an effect's dry/wet mix delays its dry side (see `ChainRuntime::process`).
+//! A path-level chain bypass skips every effect the same way, and the total
+//! still counts.  The mixer lines the paths up per device with it (`output_map`,
+//! "Alignment").  An oversampled NAM block adds its up/down pair's delay,
+//! read from the NAM stage and added here; a block that is not oversampling
+//! adds none.  The cabinet adds none either: a short direct head plus
+//! partitioned overlap-save, and a delay that is the impulse itself is not
+//! reported here.
+//!
+//! The plugin-chain side of [`PathControls`] (edits, publish, controls,
+//! servicing, state) is in `plugins`, with how a chain is handed between
+//! the UI and the audio thread ("Chain handover").
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -16,7 +77,6 @@ use super::eq::{EqSettings, EqSlot};
 use super::gate::GateSettings;
 use super::nam::{NamCommand, NamPark, NamPending, NamStack, PreparedNam};
 use super::output_map::level_gain;
-use super::pitch::PitchSettings;
 use super::plugins::{ChainHome, ChainModel, PluginView, SlotLink, SlotPark};
 
 mod plugins;
@@ -57,9 +117,11 @@ pub fn sanitize_path_match(match_db: f32) -> f32 {
     }
 }
 
+/// What a path's chain runs on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PathFeed {
+    /// The input, through the path's routing.  The default.
     #[default]
     Input,
     /// The other paths' sends: the path is a return.
@@ -80,22 +142,27 @@ pub(crate) fn path_level_gain(level_db: f32) -> f32 {
     }
 }
 
-/// NAM blocks are not here: sixteen of them do not fit one [`Copy`].
-/// Neither are the plugin instances or the cabinet kernel.
+/// The settings of one path the UI owns and pushes: input routing, mono,
+/// channel enable, the two EQs, the gate, the cabinet, the path level, mute
+/// and solo, and the effect-chain bypass.  The NAM blocks are pushed
+/// separately ([`PathControls::set_nam`]): sixteen of them do not fit a
+/// snapshot the mixer copies as one [`Copy`] value.  The plugin chain, the
+/// NAM captures, and the cabinet kernel live in the engine
+/// ([`PathControls`]); neither file path is copied onto the audio thread.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PathMix {
     /// The 2 × 4 input routing (input × tap).  Only taps 1/2 (the path's
     /// L/R) are used; 3/4 are kept for the stored layout.
     pub routes: [[bool; 4]; 2],
     pub mono: bool,
+    /// Channel enable for the path's L and R.
     pub output_enabled: [bool; 2],
     /// The EQs before and after the effects, indexed by [`EqSlot`].
     pub eqs: [EqSettings; 2],
     pub gate: GateSettings,
-    /// Built-in pitch shifter, first in the chain.  Never runs on a return.
-    pub pitch: PitchSettings,
     /// Built-in cabinet.  The impulse path is not here: this stays [`Copy`].
     pub cab: CabControls,
+    /// Path level, dB (see `PATH_LEVEL_MIN_DB` / `PATH_LEVEL_MAX_DB`).
     pub level_db: f32,
     /// Loudness-match trim, dB (±[`PATH_MATCH_MAX_DB`]), applied with the
     /// level on every output.
@@ -105,8 +172,11 @@ pub struct PathMix {
     /// Skips every effect's processing without changing each effect's own
     /// bypass.  Latency stays counted.
     pub chain_bypass: bool,
+    /// What the chain runs on: the input, or the other paths' sends.
     pub feed: PathFeed,
-    /// Only a send to a return, from an input path, plays.
+    /// The send to each slot, dB, after this path's level ([`SEND_OFF_DB`]
+    /// is off).  Only a send to a return, from a path fed by the input,
+    /// plays.
     pub sends: [f32; MAX_PATHS],
 }
 
@@ -118,7 +188,6 @@ impl Default for PathMix {
             output_enabled: [true, true],
             eqs: [EqSettings::default(), EqSettings::default()],
             gate: GateSettings::default(),
-            pitch: PitchSettings::default(),
             cab: CabControls::default(),
             level_db: 0.0,
             match_db: 0.0,
@@ -132,14 +201,13 @@ impl Default for PathMix {
 }
 
 impl PathMix {
-    /// Every value in range (EQ, gate, pitch, level, match and sends).  A NaN
+    /// Every value in range (EQ, gate, level, match and sends).  A NaN
     /// send is off, not 0 dB.  A return has no solo and no sends of its own.
     pub fn sanitized(self) -> Self {
         let is_return = self.is_return();
         Self {
             eqs: self.eqs.map(EqSettings::sanitized),
             gate: self.gate.sanitized(),
-            pitch: self.pitch.sanitized(),
             cab: self.cab.sanitized(),
             level_db: sanitize_path_level(self.level_db),
             match_db: sanitize_path_match(self.match_db),
@@ -168,10 +236,12 @@ pub fn sanitize_send(level_db: f32) -> f32 {
     }
 }
 
+/// Where one path slot is in its life.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PathState {
     /// Unused: the mixer skips it.
     Inactive = 0,
+    /// Playing.
     Active = 1,
     /// Removed, but still running until its fade-out ends.
     FadingOut = 2,
@@ -186,6 +256,7 @@ impl PathState {
         }
     }
 
+    /// Whether the mixer runs a slot in this state.
     pub(crate) fn is_live(self) -> bool {
         self != Self::Inactive
     }
@@ -200,6 +271,7 @@ pub(crate) struct LiveSlots {
 }
 
 impl LiveSlots {
+    /// Just slot 0: the one path every run has had so far.
     #[cfg(test)]
     pub(crate) fn main() -> Self {
         Self {
@@ -208,6 +280,7 @@ impl LiveSlots {
         }
     }
 
+    /// The live slots among `states`, in slot order.
     pub(crate) fn from_states(states: impl IntoIterator<Item = PathState>) -> Self {
         let mut live = Self::default();
         for (slot, state) in states.into_iter().enumerate().take(MAX_PATHS) {
@@ -229,6 +302,7 @@ impl LiveSlots {
         self.iter().any(|live| live == slot)
     }
 
+    /// The live slots as one flag per slot.
     pub(crate) fn mask(&self) -> [bool; MAX_PATHS] {
         let mut mask = [false; MAX_PATHS];
         for slot in self.iter() {
@@ -242,6 +316,7 @@ impl LiveSlots {
 /// live path's together (`Shared::total_dsp`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DspTime {
+    /// Smoothed time on the path's chain per block, ns.
     pub avg_ns: u32,
     /// The longest recent block, decaying over about two seconds, ns.
     pub peak_ns: u32,
@@ -250,10 +325,12 @@ pub struct DspTime {
 }
 
 impl DspTime {
+    /// The smoothed time as a share of the block (0 without a block).
     pub fn avg_share(&self) -> f32 {
         self.share(self.avg_ns)
     }
 
+    /// The peak as a share of the block.
     pub fn peak_share(&self) -> f32 {
         self.share(self.peak_ns)
     }
@@ -267,8 +344,11 @@ impl DspTime {
     }
 }
 
-/// A chain skip is a busy lock; an effect skip is a pause.  The audio
-/// thread writes these and never reads them back.
+/// How often the audio thread tried one piece of plugin work and how often
+/// it skipped it for that chunk.  For the chain a skip is a busy chain
+/// lock; for an effect it is a pause (a restart, a stopped or failed
+/// start), since no effect has a lock the UI could hold.  Measurement only:
+/// the audio thread writes these relaxedly and never reads them back.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LockStats {
     pub attempts: u64,
@@ -292,15 +372,21 @@ impl LockStats {
     }
 }
 
+/// One path's plugin counters: the chunks the chain missed and each
+/// effect's pauses.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PluginLockReport {
     pub chain: LockStats,
     pub effects: Vec<LockStats>,
-    /// A panicking edit.  The skip counters then describe nothing.
+    /// A chain edit panicked, so the chain is unused for the rest of the
+    /// run (see `PathControls::chain_poisoned`).  The skip counters then
+    /// describe nothing, and Diagnostics says so instead of showing a rate.
     pub chain_poisoned: bool,
 }
 
-/// No lock.  A reader may see one block's average beside the next peak.
+/// A [`DspTime`] as atomics, so the audio thread can publish it without a
+/// lock.  Each field is stored on its own (`Relaxed`): a reader may see one
+/// block's average beside the next block's peak, which a meter can afford.
 #[derive(Debug, Default)]
 pub(crate) struct DspCell {
     avg_ns: AtomicU32,
@@ -317,6 +403,7 @@ impl DspCell {
         }
     }
 
+    /// Called by the output callback at the end of each block.
     pub(crate) fn store(&self, time: DspTime) {
         self.avg_ns.store(time.avg_ns, Ordering::Relaxed);
         self.peak_ns.store(time.peak_ns, Ordering::Relaxed);
@@ -325,11 +412,16 @@ impl DspCell {
 }
 
 pub(crate) struct PathControls {
+    /// The 2 × 4 input routing (input × tap), row-major.
     pub(crate) routes: [AtomicBool; 8],
     pub(crate) mono: AtomicBool,
+    /// Channel enable for the two mix sides (taps 1/2).
     pub(crate) output_enabled: [AtomicBool; 2],
+    /// The slot's [`PathState`], as `u8`.
     state: AtomicU8,
-    /// Bumped when the slot becomes active, so the chain starts fresh.
+    /// Bumped each time the slot becomes active, so the mixer starts that
+    /// path's chain (EQ and gate state, ramps) fresh instead of carrying
+    /// over whatever the slot played before.
     generation: AtomicU64,
     /// Path level as a linear gain (`f32` bits), the loudness-match trim
     /// and its linear gain, mute and solo.
@@ -339,7 +431,9 @@ pub(crate) struct PathControls {
     match_db: AtomicU32,
     mute: AtomicBool,
     solo: AtomicBool,
+    /// The path is a return ([`PathFeed::Sends`]).
     is_return: AtomicBool,
+    /// The send to each slot, dB and as a linear gain (`f32` bits).
     send_db: [AtomicU32; MAX_PATHS],
     send_gain: [AtomicU32; MAX_PATHS],
     /// When the UI removed this path (UI thread only; the audio thread
@@ -353,57 +447,93 @@ pub(crate) struct PathControls {
     /// The gate's deepest gain reduction in the last block, dB (`f32`
     /// bits), 0 while it is open or off.  Written with the meters.
     gate_reduction_db: AtomicU32,
-    /// The trim moves only when the UI applies a result.
+    /// The Match paths measurement: a generation bumped on every start and
+    /// stop, whether it is running, and the gated integrated reading and
+    /// gated block count the audio thread publishes.  The trim only moves
+    /// when the UI applies a result; the meter never moves it.
     match_measure_generation: AtomicU64,
     match_measuring: AtomicBool,
     match_integrated: AtomicU32,
     match_blocks: AtomicU32,
-    /// Written at the end of each block.  Zero until a mixer runs.
+    /// How long the mixer spends on this path's chain per block, ns
+    /// (smoothed, and a decaying peak), and how long that block lasts, ns:
+    /// its DSP budget.  Written by the mixer at the end of each block (see
+    /// `mixer::PathProcessor::publish_dsp`), read by Diagnostics and Live.
     dsp: DspCell,
-    /// Declared before `chain_home` so these drop first.  The park
-    /// outlives the run and drains on the main thread.
+    /// Each effect's mix, bypass and plugin handle, published with the
+    /// views, so the UI sets mix, bypass and plugin controls, services the
+    /// plugins, captures their state and saves them without the model lock
+    /// (see `plugins`, "Chain handover").
+    ///
+    /// Declared before `chain_home` on purpose: fields drop in order, so
+    /// these extra references are gone before the runtime hands its slots
+    /// to the engine's slot park, which outlives this run and drains them on
+    /// the main thread.
     pub(super) slot_links: Mutex<Arc<[SlotLink]>>,
-    /// The audio thread never takes this lock.
+    /// The effect views the UI draws.  Republished by every chain edit, and
+    /// read without the model lock.  The audio thread never takes this lock,
+    /// so only UI-side readers and writers contend on it, for an `Arc`
+    /// clone.
     plugin_views: Mutex<Arc<[PluginView]>>,
     plugin_views_version: AtomicU64,
-    /// The UI rebuilds the views.  The audio thread never builds them.
+    /// Set by the audio thread when an effect fails or the chain latency
+    /// moved; the UI thread rebuilds the views from the links in
+    /// `service_plugins`, so the audio thread never builds them.
     plugin_views_dirty: AtomicBool,
     chain_rate: AtomicU32,
     chain_unopened: AtomicBool,
-    /// UI-only.  The audio thread never takes this lock.
+    /// The effect chain as the UI edits it, and the only sender of its
+    /// commands (see `plugins`, "Chain handover").  A UI-only lock: the
+    /// audio thread never takes it.
     pub(super) chain: Mutex<ChainModel>,
     /// Where the chain's runtime waits while no audio thread holds it.
     chain_home: Arc<ChainHome>,
-    /// Shared with the engine, so the park outlives the run.
+    /// Where a slot an edit let go of is released when this is not the
+    /// thread that may destroy plugins.  Shared with the engine, so the park
+    /// outlives the run.
     slot_park: Arc<SlotPark>,
-    /// Stored at each block by the holder, and by an edit from the links.
+    /// The chain's total latency, read by the mixer.  The runtime's holder
+    /// stores it at the start of every block; a chain edit stores the total
+    /// of its links.
     latency: AtomicU32,
-    /// The mixer aligns with this.  The cabinet adds none.
+    /// The whole path's latency last block: the chain's plus the delay of
+    /// each oversampled NAM block.  The mixer aligns with it, and the UI
+    /// reads it for the diagnostics line.
     path_latency: AtomicU32,
     /// Path-level effect bypass.  The runtime loads it every block; the UI
     /// stores it.  It does not write each slot's bypass.
     chain_bypass: Arc<AtomicBool>,
     plugin_active: AtomicUsize,
-    /// Its own flag, so a recount of `plugin_active` cannot clear a wake.
+    /// The UI wants the next block to enter the chain even with nothing
+    /// active (a bypass cleared, a value queued for a bypassed effect).
+    /// Its own flag, taken by the audio thread, so the audio thread's
+    /// recount of `plugin_active` cannot overwrite a wake.
     plugin_wake: AtomicBool,
-    /// Measurement only.  Written relaxedly, never read on the callback.
+    /// How often the audio thread tried to run this path's chain and how
+    /// often it did not hold the runtime, so the chunk played the chain's
+    /// input delayed instead.
+    /// Measurement only: written relaxedly by the audio thread.
     chain_attempts: AtomicU64,
     chain_skips: AtomicU64,
-    /// The chain stays unused for the rest of the run.  It never clears.
+    /// Set when a chain edit panicked: the model may no longer match the
+    /// runtime, so the chain stays unused for the rest of the run.  It
+    /// is not contention and never clears.
     chain_poisoned: AtomicBool,
     /// The two built-in EQs (pre and post effects).  Each version counter
     /// lets the audio callback notice a change without taking the lock.
     eq: [Mutex<EqSettings>; 2],
     eq_version: [AtomicU64; 2],
+    /// Built-in noise gate (PRE or POST effects).
     gate: Mutex<GateSettings>,
     gate_version: AtomicU64,
-    pitch: Mutex<PitchSettings>,
-    pitch_version: AtomicU64,
-    /// The callback `try_lock`s, and only when the version moved.
+    /// Built-in NAM blocks, in signal order.  The callback copies the whole
+    /// stack with `try_lock`, and only when its version moved.  The captures
+    /// themselves are [`pending_nam`], never this lock.
     nam: Mutex<NamStack>,
     nam_version: AtomicU64,
-    /// The callback only `try_lock`s this.  A replaced model is dropped
-    /// on the UI thread.
+    /// A model the UI has prepared, waiting for the next block, keyed by the
+    /// block it is for.  The callback only `try_lock`s this.  Dropping a
+    /// replaced model happens on the UI thread, in [`Self::queue_nam`].
     pending_nam: Mutex<NamPending>,
     /// Where a model the audio side has let go of waits to be dropped.
     /// Shared with the engine so a bridge-thread drop can park it.
@@ -412,8 +542,9 @@ pub(crate) struct PathControls {
     /// The kernel itself is [`pending_cab`], never this lock.
     cab: Mutex<CabControls>,
     cab_version: AtomicU64,
-    /// The callback only `try_lock`s this.  A replaced kernel is dropped
-    /// on the UI thread.
+    /// A kernel the UI has prepared, waiting for the next block.  The
+    /// callback only `try_lock`s this.  Dropping a replaced kernel happens
+    /// on the UI thread, in [`Self::queue_cab`].
     pending_cab: Mutex<Option<CabCommand>>,
     /// Where a kernel the audio side has let go of waits to be dropped.
     /// Shared with the engine so a bridge-thread drop can park it.
@@ -498,8 +629,6 @@ impl PathControls {
             eq_version: [AtomicU64::new(1), AtomicU64::new(1)],
             gate: Mutex::new(GateSettings::default()),
             gate_version: AtomicU64::new(1),
-            pitch: Mutex::new(PitchSettings::default()),
-            pitch_version: AtomicU64::new(1),
             nam: Mutex::new(NamStack::default()),
             nam_version: AtomicU64::new(1),
             pending_nam: Mutex::new(NamPending::default()),
@@ -511,7 +640,9 @@ impl PathControls {
         }
     }
 
-    /// Live instances stay with the run that opened them.  Call from the
+    /// Copies a previous run's settings for this path.  Live plugin
+    /// instances belong to the run that opened them; only the saved
+    /// preferences move, and the chain rebuilds from them.  Call it from the
     /// UI thread.
     pub(crate) fn adopt_settings_from(&self, previous: &PathControls) {
         let copy_bool = |to: &AtomicBool, from: &AtomicBool| {
@@ -550,27 +681,21 @@ impl PathControls {
             self.set_gate(*settings);
         }
         {
-            let settings = previous
-                .pitch
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            self.set_pitch(*settings);
-        }
-        {
             // The block settings move.  The live models stay with the run
             // that loaded them; the UI queues them again from the saved path.
             let stack = previous.nam.lock().unwrap_or_else(PoisonError::into_inner);
             self.set_nam(&stack);
         }
         {
-            // The numeric cabinet controls move.  The live kernel stays
-            // with the run that loaded it; the UI installs it again from
-            // the saved path.
+            // The numeric cabinet controls move.  The live kernel stays with
+            // the run that loaded it; the UI installs it again from the saved path.
             let settings = previous.cab.lock().unwrap_or_else(PoisonError::into_inner);
             self.set_cab(*settings);
         }
-        // A removed path starts the new run empty.  Capture state on this
-        // thread first.
+        // Only an active path carries its chain over; a removed one starts
+        // the new run empty.  Capture the old instances' state on this
+        // (UI) thread first, so the rebuilt chain reopens with what the
+        // person set since the last save.
         if previous.state() == PathState::Active {
             self.restore_plugins(previous.plugin_prefs());
         } else {
@@ -582,12 +707,17 @@ impl PathControls {
         PathState::from_u8(self.state.load(Ordering::Acquire))
     }
 
-    /// Becoming active bumps the generation first, so a mixer that sees
-    /// the slot live never plays the old chain state.
+    /// Moves the slot to `state`.  Becoming active from inactive bumps the
+    /// generation, so the chain starts fresh.  Removing (fading out) does
+    /// not: the path keeps its EQ and gate state while it fades, and a path
+    /// restored during its fade-out carries on without a jump.
     pub(crate) fn set_state(&self, state: PathState) {
         if state == PathState::Active && self.state() == PathState::Inactive {
-            // Generation first, so a live slot is never seen with the old
-            // generation.
+            // Only this (UI) thread moves a slot out of Inactive, so the
+            // slot stays Inactive until the store below.  The generation is
+            // bumped first: a mixer that sees the slot live (state, then
+            // generation, both Acquire) always sees the new generation and
+            // never plays a block with the slot's old chain state.
             self.generation.fetch_add(1, Ordering::Release);
             self.state.store(state as u8, Ordering::Release);
             return;
@@ -653,6 +783,7 @@ impl PathControls {
         self.chain_unopened.load(Ordering::Relaxed)
     }
 
+    /// When [`Self::begin_removal`] ran, while the path is fading out.
     pub(crate) fn removed_at(&self) -> Option<Instant> {
         *self
             .removed_at
@@ -671,6 +802,7 @@ impl PathControls {
         true
     }
 
+    /// Sets every UI-owned setting at once.
     pub(crate) fn set_mix(&self, mix: &PathMix) {
         self.set_routes(mix.routes);
         self.set_mono(mix.mono);
@@ -679,7 +811,6 @@ impl PathControls {
             self.set_eq(slot, mix.eqs[slot.index()]);
         }
         self.set_gate(mix.gate);
-        self.set_pitch(mix.pitch);
         self.set_cab(mix.cab);
         self.set_level_db(mix.level_db);
         self.set_match_db(mix.match_db);
@@ -690,6 +821,7 @@ impl PathControls {
         self.set_sends(mix.sends);
     }
 
+    /// The UI-owned settings as stored now.
     pub(crate) fn mix(&self) -> PathMix {
         let mut routes = [[false; 4]; 2];
         for (input, row) in routes.iter_mut().enumerate() {
@@ -711,7 +843,6 @@ impl PathControls {
             ],
             eqs: [eq(EqSlot::Pre), eq(EqSlot::Post)],
             gate: *self.gate.lock().unwrap_or_else(PoisonError::into_inner),
-            pitch: *self.pitch.lock().unwrap_or_else(PoisonError::into_inner),
             cab: *self.cab.lock().unwrap_or_else(PoisonError::into_inner),
             level_db: self.level_db(),
             match_db: self.match_db(),
@@ -736,6 +867,7 @@ impl PathControls {
         }
     }
 
+    /// Whether the path runs on the other paths' sends.
     pub(crate) fn is_return(&self) -> bool {
         self.is_return.load(Ordering::Relaxed)
     }
@@ -812,16 +944,19 @@ impl PathControls {
         self.match_measure_generation.load(Ordering::Acquire)
     }
 
+    /// Whether the Match paths meter is running.
     pub(crate) fn match_measuring(&self) -> bool {
         self.match_measuring.load(Ordering::Relaxed)
     }
 
+    /// Called by the output callback at the end of each measuring block.
     pub(crate) fn publish_match_measurement(&self, integrated_lufs: f32, blocks: u32) {
         self.match_integrated
             .store(integrated_lufs.to_bits(), Ordering::Relaxed);
         self.match_blocks.store(blocks, Ordering::Relaxed);
     }
 
+    /// The last gated integrated reading, LUFS, and its gated block count.
     pub(crate) fn match_measurement(&self) -> (f32, u32) {
         (
             f32::from_bits(self.match_integrated.load(Ordering::Relaxed)),
@@ -863,6 +998,7 @@ impl PathControls {
         }
     }
 
+    /// Whether input `input` reaches tap `tap`.
     pub(crate) fn route(&self, input: usize, tap: usize) -> bool {
         self.routes[input * 4 + tap].load(Ordering::Relaxed)
     }
@@ -885,6 +1021,7 @@ impl PathControls {
         )
     }
 
+    /// Called by the output callback at the end of each block.
     pub(crate) fn store_meters(&self, left: f32, right: f32) {
         self.meter_l.store(left.to_bits(), Ordering::Relaxed);
         self.meter_r.store(right.to_bits(), Ordering::Relaxed);
@@ -913,6 +1050,7 @@ impl PathControls {
         self.dsp.load()
     }
 
+    /// Called by the output callback at the end of each block.
     pub(crate) fn store_dsp_time(&self, time: DspTime) {
         self.dsp.store(time);
     }
@@ -957,29 +1095,6 @@ impl PathControls {
         self.gate.try_lock().ok().map(|settings| *settings)
     }
 
-    pub(crate) fn set_pitch(&self, settings: PitchSettings) {
-        if let Ok(mut current) = self.pitch.lock() {
-            if *current != settings {
-                *current = settings;
-                self.pitch_version.fetch_add(1, Ordering::Release);
-            }
-        }
-    }
-
-    pub(crate) fn pitch_version(&self) -> u64 {
-        self.pitch_version.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn try_pitch(&self) -> Option<PitchSettings> {
-        self.pitch.try_lock().ok().map(|settings| *settings)
-    }
-
-    /// Holds the pitch lock, so the audio side finds it busy.
-    #[cfg(test)]
-    pub(crate) fn hold_pitch(&self) -> std::sync::MutexGuard<'_, PitchSettings> {
-        self.pitch.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
     /// Applies the NAM blocks.  Does not parse or build a model.
     pub(crate) fn set_nam(&self, stack: &NamStack) {
         let stack = stack.sanitized();
@@ -1000,6 +1115,7 @@ impl PathControls {
         self.nam.try_lock().ok().map(|stack| *stack)
     }
 
+    /// The blocks as stored now (the UI thread).
     pub(crate) fn nam(&self) -> NamStack {
         *self.nam.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -1070,7 +1186,9 @@ impl PathControls {
         &self.cab_park
     }
 
-    /// A kernel still waiting is dropped here, on the UI thread.
+    /// Queues a kernel for the next block.  A kernel still waiting is
+    /// dropped here, on the UI thread.  The same path at the same rate is
+    /// the caller's to skip; this always replaces.
     pub(crate) fn queue_cab(&self, kernel: CabKernel) {
         let mut slot = self
             .pending_cab
@@ -1108,8 +1226,13 @@ impl PathControls {
 
 impl Drop for PathControls {
     fn drop(&mut self) {
-        // The last `Arc` can drop on the bridge thread.  A queued model
-        // must not be destroyed there.  `get_mut` does not lock.
+        // `Shared`'s last `Arc` can drop on the `rigwerk-bridge` thread:
+        // `replace_run` drops the engine's clone while the bridge still
+        // holds one, and `run_bridge` drops that one after the callback
+        // has stopped.  A model still queued must not be destroyed there.
+        // `get_mut` does not lock; this is the last reference to the
+        // controls.  The park outlives the run (the engine holds it), and
+        // the UI thread is what later drops the model.
         let pending = self
             .pending_nam
             .get_mut()

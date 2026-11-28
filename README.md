@@ -21,9 +21,6 @@ edges.
   gate.
   Paths stay time-aligned on every output.  An effects return runs one
   reverb or delay on every path's sends.
-- **Pitch shifter**, first in each path: drop or raise the whole guitar
-  by up to an octave, with 4–40 ms of delay.  Built for single notes and
-  power chords; full chords chorus, less with a longer delay.
 - **NAM blocks.** Load Neural Amp Modeler `.nam` captures straight into a
   path and stack them, e.g. a drive pedal into an amp, with automatic level
   matching. No plugin needed.

@@ -113,9 +113,3 @@ opt-level = 3
 
 [profile.release.package.nam-rs]
 opt-level = 3
-
-# rustfft runs at opt-level 3 in the dev profile too: the pitch shifter's
-# tests score their output with FFTs (`audio/pitch/tests/score.rs`), and
-# unoptimised ones would make the always-on suite slow.
-[profile.dev.package.rustfft]
-opt-level = 3

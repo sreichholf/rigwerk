@@ -53,12 +53,11 @@ fn previous_and_next_walk_the_chain_in_signal_order() {
     use crate::audio::GateSlot;
     let mut app = with_effects(&["A", "B"]);
     app.path_mut().mix.gate.slot = GateSlot::Pre;
-    app.open_sheet(Sheet::Pitch { path: 0 });
-    assert_eq!(
-        app.sheet_neighbour(false),
-        None,
-        "the pitch shifter is first"
-    );
+    app.open_sheet(Sheet::Eq {
+        path: 0,
+        post: false,
+    });
+    assert_eq!(app.sheet_neighbour(false), None);
     let mut seen = vec![app.chrome.sheet.unwrap()];
     while app.step_sheet(true) {
         seen.push(app.chrome.sheet.unwrap());
@@ -66,7 +65,6 @@ fn previous_and_next_walk_the_chain_in_signal_order() {
     assert_eq!(
         seen,
         [
-            Sheet::Pitch { path: 0 },
             Sheet::Eq {
                 path: 0,
                 post: false
@@ -87,33 +85,6 @@ fn previous_and_next_walk_the_chain_in_signal_order() {
     assert_eq!(app.chrome.sheet, Some(Sheet::Gate { path: 0 }));
     app.open_sheet(Sheet::Path { path: 0 });
     assert_eq!(app.sheet_neighbour(true), None, "only stages step");
-}
-
-#[test]
-fn a_return_has_no_pitch_stage_to_step_to() {
-    use crate::app::chain::ChainSelection;
-    use crate::audio::PathFeed;
-    let mut app = with_effects(&[]);
-    app.open_sheet(Sheet::Pitch { path: 0 });
-    assert_eq!(app.chain_selected, ChainSelection::Pitch);
-    assert!(app.step_sheet(true));
-    assert_eq!(
-        app.chrome.sheet,
-        Some(Sheet::Eq {
-            path: 0,
-            post: false
-        })
-    );
-    assert_eq!(app.sheet_neighbour(false), Some(Sheet::Pitch { path: 0 }));
-    app.path_mut().mix.feed = PathFeed::Sends;
-    assert_eq!(
-        app.sheet_neighbour(false),
-        None,
-        "a return starts at Pre EQ"
-    );
-    app.open_sheet(Sheet::Pitch { path: 0 });
-    app.tidy_sheet();
-    assert_eq!(app.chrome.sheet, None, "a return's pitch sheet closes");
 }
 
 #[test]
@@ -166,7 +137,6 @@ fn sheet_keys_name_every_sheet() {
         })
     );
     assert_eq!(Sheet::from_key("Gate", 1), Some(Sheet::Gate { path: 1 }));
-    assert_eq!(Sheet::from_key("pitch", 1), Some(Sheet::Pitch { path: 1 }));
     assert_eq!(
         Sheet::from_key("amp", 0),
         Some(Sheet::Nam { path: 0, index: 0 })

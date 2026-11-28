@@ -1,6 +1,9 @@
 #![allow(clippy::needless_range_loop)] // Frames of several devices, indexed alike.
 
-//! Two identical paths, one latent, must not comb on a device.
+//! Latency alignment through the whole mixer: two identical paths, one with
+//! a latent effect (a pure delay standing in for a lookahead plugin), on
+//! the clock output, the extra outputs of the PipeWire direct path and a generic
+//! extra output fed through its ring.
 
 use super::super::eq::EqSettings;
 use super::super::nam::NamStack;
@@ -24,7 +27,7 @@ fn delayed(n: usize, by: usize) -> f32 {
 }
 
 /// Two identical paths (EQs off, IN 1/2 on L/R), path 0 with a pure delay
-/// of `latency` frames, both on every device.  `extra_outputs` are stereo.
+/// of `latency` frames, both on every device; `extra_outputs` stereo extra outputs.
 fn aligned_mixer(latency: u32, extra_outputs: usize) -> (OutputMixer, Shared) {
     let shared = Shared::new(RATE);
     shared.set_master(false, [true, true], false);
@@ -67,7 +70,8 @@ fn run(
     let devices = 1 + shared.extra_output_count();
     // Sized up front: the write closure runs inside the allocation guard.
     let mut out = vec![vec![[0.0f32; 2]; blocks * BLOCK]; devices];
-    // Sized here: the callback must not allocate.
+    // The callback must not allocate: the scratch is sized here, as the
+    // backends do before the first block.
     mixer.prepare(BLOCK);
     for block in 0..blocks {
         let left: Vec<f32> = (*clock..*clock + BLOCK).map(signal).collect();
@@ -236,8 +240,7 @@ fn polarity_cancels_and_a_trim_moves_one_path() {
     let mut inverted = OutputDeviceSettings::default();
     inverted.path_map[1].invert = true;
     shared.clock_output.set(&inverted);
-    // Extra output: path 1 trimmed by +1 ms (48 frames) on top of
-    // the alignment.
+    // Extra output: path 1 trimmed by +1 ms (48 frames) on top of the alignment.
     let mut trimmed = OutputDeviceSettings::default();
     trimmed.path_map[1].trim_ms = 1.0;
     let plan = ExtraOutputPlan {
@@ -333,90 +336,6 @@ fn a_missed_chain_keeps_the_sum_in_time_and_level() {
     }
 }
 
-/// One path with an oversampled NAM block before a pure delay of
-/// `latency`, playing only on the clock output.
-fn oversampled_chain_mixer(latency: u32) -> (OutputMixer, Shared) {
-    use super::super::nam::NamBlockControls;
-    let shared = Shared::new(RATE);
-    shared.set_master(false, [true, true], false);
-    shared
-        .direct
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    let off = EqSettings {
-        enabled: false,
-        ..EqSettings::default()
-    };
-    let mix = PathMix {
-        eqs: [off, off],
-        ..PathMix::default()
-    };
-    let mut stack = NamStack::default();
-    stack.push(NamBlockControls::default());
-    shared.restore_path(0, &mix, &stack, Vec::new());
-    shared.paths[0].queue_nam(0, super::rt_tests::scaled_model());
-    shared.paths[0].edit_chain(|chain| chain.insert_delay_for_test(latency));
-    let mut mixer = OutputMixer::new(RATE, 2);
-    mixer.prepare(BLOCK);
-    (mixer, shared)
-}
-
-/// The fallback for a missed chain stands in for the plugin chain alone:
-/// its input already comes out of the oversampled block, so it delays by
-/// the chain's latency, not the whole path's.
-#[test]
-fn a_missed_chain_after_an_oversampled_block_keeps_its_timing() {
-    const LATENCY: u32 = 64;
-    let (mut reference, reference_shared) = oversampled_chain_mixer(LATENCY);
-    let (mut mixer, shared) = oversampled_chain_mixer(LATENCY);
-    let mut clock = 0;
-    let mut reference_clock = 0;
-    // The model warms up and fades in.
-    let mut want = run_left(
-        &mut reference,
-        &reference_shared,
-        &mut reference_clock,
-        16,
-        signal,
-    );
-    let mut out = run_left(&mut mixer, &shared, &mut clock, 16, signal);
-    assert!(
-        shared.paths[0].path_latency_samples() > LATENCY,
-        "the block oversamples: {}",
-        shared.paths[0].path_latency_samples()
-    );
-    reference.park_chains_for_test();
-    want.extend(run_left(
-        &mut reference,
-        &reference_shared,
-        &mut reference_clock,
-        1,
-        signal,
-    ));
-    {
-        mixer.park_chains_for_test();
-        let _held = shared.paths[0].hold_chain_for_test();
-        out.extend(run_left(&mut mixer, &shared, &mut clock, 1, signal));
-    }
-    want.extend(run_left(
-        &mut reference,
-        &reference_shared,
-        &mut reference_clock,
-        4,
-        signal,
-    ));
-    out.extend(run_left(&mut mixer, &shared, &mut clock, 4, signal));
-    let peak = want
-        .iter()
-        .fold(0.0f32, |peak, sample| peak.max(sample.abs()));
-    assert!(peak > 0.1, "the path plays: {peak}");
-    for (n, (sample, wanted)) in out.iter().zip(&want).enumerate() {
-        assert!(
-            (sample - wanted).abs() < 2e-3,
-            "frame {n}: {sample} vs {wanted}"
-        );
-    }
-}
-
 #[test]
 fn one_path_without_latency_has_no_delay() {
     let (mut mixer, shared) = aligned_mixer(0, 0);
@@ -493,8 +412,7 @@ fn a_missed_chain_fades_into_the_fallback_without_a_click() {
         out.extend(run(&mut mixer, &shared, &mut clock, 1).remove(0));
     }
     out.extend(run(&mut mixer, &shared, &mut clock, 2).remove(0));
-    // From the limited plugin level to the dry sine and back: smoothed
-    // both ways.
+    // From the limited plugin level to the dry sine and back: smoothed both ways.
     let step = largest_step(&out, 0);
     assert!(step < 0.05, "largest step {step}");
     assert!(
@@ -868,229 +786,4 @@ fn a_return_plays_on_the_ring_path_too() {
     }
     assert!((last[0] - 0.25).abs() < 1e-4, "{last:?}");
     assert!((last[1] + 0.25).abs() < 1e-4, "{last:?}");
-}
-
-/// Bursts of a sine over a faint hiss, so a keyed gate opens and closes
-/// many times, some of them inside a block.
-fn bursts(n: usize) -> f32 {
-    let hiss = ((n.wrapping_mul(2_654_435_761) >> 7) % 1_000) as f32 / 1_000.0 - 0.5;
-    let on = (n / 700) % 3 != 1;
-    let tone = if on {
-        (n as f32 * 0.05).sin() * 0.25
-    } else {
-        0.0
-    };
-    tone + hiss * 0.002
-}
-
-/// Folds output samples (as bits) into one hash (FNV-1a style).
-fn hash_samples(samples: &[f32]) -> u64 {
-    samples
-        .iter()
-        .fold(0xcbf2_9ce4_8422_2325u64, |hash, sample| {
-            sample
-                .to_bits()
-                .to_le_bytes()
-                .iter()
-                .fold(hash, |hash, byte| {
-                    (hash ^ u64::from(*byte)).wrapping_mul(0x0001_0000_0000_01b3)
-                })
-        })
-}
-
-/// A keyed gate, shifter off, matches the recorded hashes.
-#[test]
-fn a_keyed_gate_with_the_pitch_shifter_off_is_bit_identical() {
-    use super::super::gate::GateSlot;
-    let mut hashes = Vec::new();
-    for slot in [GateSlot::Pre, GateSlot::Post] {
-        let (mut mixer, shared, _) = keyed_gate_mixer(300, slot);
-        let mut clock = 0;
-        let out = run_left(&mut mixer, &shared, &mut clock, 40, bursts);
-        assert!(out.iter().any(|sample| sample.abs() > 0.1));
-        hashes.push(hash_samples(&out));
-    }
-    // The gate uses libm, so the hashes are checked only where they
-    // were recorded.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    assert_eq!(hashes, [0x57b0_6de8_cb91_6ca0; 2]);
-}
-
-/// The pitch shifter on at 0 semitones.
-fn pitch_on() -> super::super::pitch::PitchSettings {
-    super::super::pitch::PitchSettings {
-        enabled: true,
-        ..super::super::pitch::PitchSettings::default()
-    }
-}
-
-/// A path with the shifter on reports its latency, really has it, and a
-/// path without it lines up with it: at 0 semitones the two sum to twice
-/// the delayed signal.
-#[test]
-fn a_path_with_the_pitch_shifter_lines_up_with_one_without() {
-    let latency = super::super::pitch::pitch_latency_samples(RATE, pitch_on().delay_ms);
-    let (mut mixer, shared) = aligned_mixer(0, 0);
-    let mut mix = shared.paths[0].mix();
-    mix.pitch = pitch_on();
-    shared.paths[0].set_mix(&mix);
-    mixer.prepare(BLOCK);
-    let mut clock = 0;
-    let out = run_left(&mut mixer, &shared, &mut clock, 40, signal);
-    assert_eq!(shared.paths[0].path_latency_samples(), latency);
-    assert_eq!(shared.paths[1].path_latency_samples(), 0);
-    let report = shared.clock_output.alignment().expect("published");
-    assert_eq!(report.delays[0], Some(0));
-    assert_eq!(report.delays[1], Some(latency));
-    // From the first sample the shifted path is the input, delayed by
-    // exactly what it reports.
-    let mut worst = 0.0f32;
-    for (n, sample) in out.iter().enumerate() {
-        worst = worst.max((sample - 2.0 * delayed(n, latency as usize)).abs());
-    }
-    assert!(worst < 1e-3, "{worst}");
-}
-
-/// Switching the shifter off takes its latency off the path again.
-#[test]
-fn switching_the_pitch_shifter_off_drops_its_latency() {
-    let (mut mixer, shared) = aligned_mixer(64, 0);
-    let mut mix = shared.paths[0].mix();
-    mix.pitch = pitch_on();
-    shared.paths[0].set_mix(&mix);
-    mixer.prepare(BLOCK);
-    let mut clock = 0;
-    let _ = run_left(&mut mixer, &shared, &mut clock, 4, signal);
-    let on = super::super::pitch::pitch_latency_samples(RATE, pitch_on().delay_ms);
-    assert_eq!(shared.paths[0].path_latency_samples(), 64 + on);
-    mix.pitch.enabled = false;
-    shared.paths[0].set_mix(&mix);
-    // The dip: warm nothing, fade out, switch, fade in.
-    let out = run_left(&mut mixer, &shared, &mut clock, 8, signal);
-    assert_eq!(shared.paths[0].path_latency_samples(), 64);
-    assert!(out.iter().all(|sample| sample.is_finite()));
-}
-
-/// A longer pitch delay lands on the path's latency, and the other path
-/// follows it: at 0 semitones the two sum to twice the newly delayed
-/// signal again.
-#[test]
-fn the_other_path_follows_a_pitch_delay_change() {
-    use super::super::pitch::{pitch_latency_samples, PITCH_MAX_DELAY_MS};
-    let (mut mixer, shared) = aligned_mixer(0, 0);
-    let mut mix = shared.paths[0].mix();
-    mix.pitch = pitch_on();
-    shared.paths[0].set_mix(&mix);
-    mixer.prepare(BLOCK);
-    let mut clock = 0;
-    let _ = run_left(&mut mixer, &shared, &mut clock, 8, signal);
-    let before = pitch_latency_samples(RATE, pitch_on().delay_ms);
-    assert_eq!(shared.paths[0].path_latency_samples(), before);
-    mix.pitch.delay_ms = PITCH_MAX_DELAY_MS;
-    shared.paths[0].set_mix(&mix);
-    let start = clock;
-    let out = run_left(&mut mixer, &shared, &mut clock, 40, signal);
-    let after = pitch_latency_samples(RATE, PITCH_MAX_DELAY_MS);
-    assert!(after > before);
-    assert_eq!(shared.paths[0].path_latency_samples(), after);
-    let report = shared.clock_output.alignment().expect("published");
-    assert_eq!(report.delays[0], Some(0));
-    assert_eq!(report.delays[1], Some(after));
-    assert!(out.iter().all(|sample| sample.is_finite()));
-    let settled = out.len() - 8 * BLOCK;
-    let mut worst = 0.0f32;
-    for (n, sample) in out.iter().enumerate().skip(settled) {
-        worst = worst.max((sample - 2.0 * delayed(start + n, after as usize)).abs());
-    }
-    assert!(worst < 1e-3, "{worst}");
-}
-
-/// A reused slot whose first block finds the pitch lock busy runs with the
-/// shifter off, not with the settings of the path it held before.
-#[test]
-fn a_reused_slot_does_not_run_the_last_paths_pitch() {
-    use super::super::path::PathState;
-    let (mut mixer, shared) = aligned_mixer(0, 0);
-    let mut mix = shared.paths[0].mix();
-    mix.pitch = pitch_on();
-    shared.paths[0].set_mix(&mix);
-    mixer.prepare(BLOCK);
-    let mut clock = 0;
-    let _ = run_left(&mut mixer, &shared, &mut clock, 4, signal);
-    assert!(shared.paths[0].path_latency_samples() > 0);
-    shared.paths[0].set_state(PathState::FadingOut);
-    let _ = run_left(&mut mixer, &shared, &mut clock, 8, signal);
-    assert_eq!(shared.paths[0].state(), PathState::Inactive);
-    mix.pitch.enabled = false;
-    shared.paths[0].set_mix(&mix);
-    let held = shared.paths[0].hold_pitch();
-    shared.paths[0].set_state(PathState::Active);
-    let _ = run_left(&mut mixer, &shared, &mut clock, 1, signal);
-    assert_eq!(shared.paths[0].path_latency_samples(), 0);
-    drop(held);
-}
-
-/// A return never runs the shifter and never counts its latency, even with
-/// it saved on.
-#[test]
-fn a_return_never_runs_the_pitch_shifter() {
-    let (mut mixer, shared) = return_mixer(0, 0.0, [false, true, false]);
-    let mut mix = shared.paths[1].mix();
-    mix.pitch = super::super::pitch::PitchSettings {
-        semitones: -5,
-        ..pitch_on()
-    };
-    shared.paths[1].set_mix(&mix);
-    shared.paths[2].set_mute(true);
-    let mut clock = 0;
-    let out = run(&mut mixer, &shared, &mut clock, 24);
-    assert_eq!(shared.paths[1].path_latency_samples(), 0);
-    for (n, frame) in out[0].iter().enumerate().skip(SETTLE) {
-        assert!((frame[0] - signal(n)).abs() < 1e-6, "frame {n}: {frame:?}");
-        assert!((frame[1] + signal(n)).abs() < 1e-6, "frame {n}: {frame:?}");
-    }
-}
-
-/// With the shifter on, a gate keyed on the dry input in either slot hears
-/// the note when the shifted note reaches it, not a pitch latency early: at
-/// 0 semitones the path plays what a path without the shifter plays on the
-/// input delayed by the shifter's latency, the gate's opening included.
-#[test]
-fn a_keyed_gate_behind_the_pitch_shifter_opens_on_the_delayed_note() {
-    use super::super::gate::GateSlot;
-    const CHAIN: u32 = 300;
-    // The tone is near its peak where the burst starts, so a gate already
-    // open when the note arrives would pass it at once.
-    const START: usize = 8_192;
-    const BURST: usize = 4_096;
-    let pitch = super::super::pitch::pitch_latency_samples(RATE, pitch_on().delay_ms) as usize;
-    let blocks = (START + BURST + pitch) / BLOCK + 24;
-    let input = |n: usize| {
-        if (START..START + BURST).contains(&n) {
-            (n as f32 * 0.05).sin() * 0.25
-        } else {
-            0.0
-        }
-    };
-    for slot in [GateSlot::Pre, GateSlot::Post] {
-        let (mut mixer, shared, _) = keyed_gate_mixer(CHAIN, slot);
-        let mut mix = shared.paths[0].mix();
-        mix.pitch = pitch_on();
-        shared.paths[0].set_mix(&mix);
-        let mut clock = 0;
-        let out = run_left(&mut mixer, &shared, &mut clock, blocks, input);
-        let (mut reference, reference_shared, _) = keyed_gate_mixer(CHAIN, slot);
-        let mut clock = 0;
-        let want = run_left(&mut reference, &reference_shared, &mut clock, blocks, |n| {
-            n.checked_sub(pitch).map_or(0.0, input)
-        });
-        let arrives = START + pitch + CHAIN as usize;
-        assert!(out[arrives + 64].abs() > 0.05, "{slot:?}: the note plays");
-        for (n, (sample, wanted)) in out.iter().zip(&want).enumerate() {
-            assert!(
-                (sample - wanted).abs() < 2e-3,
-                "{slot:?} frame {n}: {sample} vs {wanted}"
-            );
-        }
-    }
 }

@@ -24,11 +24,9 @@ the scope; and the input gain. A click on the device opens Setup › Input.
 
 - a source: which input channels feed it, in stereo or summed to mono,
   or *Sends* for an effects return (below);
-- a chain in signal order: Pitch (not on a return), Pre EQ, the gate
-  (when before), NAM blocks before the effects, the effects, NAM blocks
-  after them, the cab, the gate (when after), Post EQ.  The *Pitch* row is
-  off by default; its LED, or *Turn on* / *Turn off* on a right-click,
-  switches it, and the row shows the shift, *Bypass* or *Off*;
+- a chain in signal order: Pre EQ, the gate (when before), NAM blocks
+  before the effects, the effects, NAM blocks after them, the cab, the
+  gate (when after), Post EQ;
 - its latency and DSP load;
 - level, mute and solo, and a *match* line under the fader when its
   loudness-match trim is not zero.  A click opens the path sheet.
@@ -125,36 +123,12 @@ instead.
 ## Sheets, drawers and diagnostics
 
 Click a stage in a chain, a path name or an output to edit it in a sheet at
-the bottom of the console. A sheet covers one thing at a time: pitch, EQ,
-gate, NAM, cab, effect, path, output or scope. It can be resized from its top
+the bottom of the console. A sheet covers one thing at a time: EQ, gate,
+NAM, cab, effect, path, output or scope. It can be resized from its top
 edge and moves through the chain with *‹ previous* and *next ›*. Esc
 closes it. The title bar and status bar keep working while it is open,
 and each strip shows a thin meter.
 
-- **Pitch** shifts the whole guitar, all strings at once.
-  - *On* / *Bypass* / *Off* in the header.  *Off* (the default) takes the
-    stage and its latency out of the chain.  *Bypass* plays the dry signal
-    at the same delay, so switching between *On* and *Bypass* does not
-    move the alignment.
-  - *Semitones* −12 to +12, with − and + beside the slider; *Cents* −50 to
-    +50; *Wet* 0–100 % (default 100 %).  Below 100 % the dry signal plays
-    with the shifted one, e.g. to double a note an octave down.
-  - *Delay* 4–40 ms (default 4 ms): shorter for single notes and power
-    chords, longer for full chords (smoother: the splices sit further
-    apart, so every note sounds that much later).  It is the latency the
-    path reports and the alignment uses; the shifter's read delay still
-    moves around it between attacks (most on low notes and chords).  A
-    drag applies when you let go; each change dips the path for a moment
-    and the other paths on its outputs re-align.
-  - *Reset* restores shift, wet and delay; *On* / *Bypass* / *Off* stays.
-  - The stage plays (L + R) / 2 on both sides, so a path that carries
-    only one side comes out 6 dB quieter.  Both sides are written, so it
-    also fills a path side switched off before the chain.
-  - Turning it on or off changes the path's latency: the path plays dry
-    while the state warms (about 80 ms), dips for a moment and then plays
-    shifted; the other paths on its outputs re-align.
-  - A return has no *Pitch*.  The tuner listens to the input, so it shows
-    the unshifted pitch.
 - **EQ** has five bands (low shelf, three bells, high shelf) with a curve
   and a band table, and a *Flat* button.
 - **Gate** has threshold, range, hysteresis, attack, release and hold, a
@@ -195,8 +169,6 @@ and each strip shows a thin meter.
   and the bridge buffer of an extra output are here too.
 - **Scope** shows input and output overlaid, with the peaks and the sample
   count.
-
-![The pitch sheet](screenshots/pitch-sheet.png)
 
 ![The EQ sheet](screenshots/eq-sheet.png)
 

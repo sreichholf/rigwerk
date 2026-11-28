@@ -1,5 +1,20 @@
-//! One chain row.  A switched row is on or off, not bypassed, but the event
-//! is still [`ChainEvent::Bypass`].  Moving an effect closes its open editor.
+//! One chain row (`docs/ui-spec.md` §4.2).
+//!
+//! 28 pt high, 3 pt corners, filled with `slot`.  The LED is filled while
+//! the stage is on and a ring while it is bypassed.  An EQ row can draw a
+//! mini curve, a gate row its threshold and an effect row its latency.
+//! Selected rows take an `accent` outline and `accent_bg`.  A stage that
+//! failed to load prints its name in `error_text` with *Didn't load*.
+//! A paused effect draws a pause glyph.
+//!
+//! Click selects.  The LED bypasses.  Double-clicking an effect asks to
+//! open it.  An effect's right-click menu and Alt+↑ / Alt+↓ move it,
+//! Ctrl+Enter opens its editor, and dragging it sets an [`EffectDrag`]
+//! payload.  The hover on that grip says that moving an effect closes its
+//! open editor.  A NAM block row moves the same way and drags as a
+//! [`NamDrag`]; a built-in row only bypasses.  A `warn` row prints its mark
+//! in the warning colour, which is how an overloaded NAM block shows what
+//! it costs.
 
 use eframe::egui;
 use egui::{CornerRadius, Rect, Sense, Stroke, Vec2};
@@ -12,9 +27,12 @@ use crate::ui::widgets::{palette_focus, row_info};
 /// Row height, fixed so a chain can scroll by rows.
 pub(crate) const CHAIN_ROW_H: f32 = 28.0;
 
+/// What a chain row did this frame, besides a drag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ChainEvent {
+    /// Click the row: select it and open its sheet.
     Select,
+    /// Click the LED.
     Bypass,
     /// Double-click an effect: its editor or its controls.
     Open,
@@ -25,25 +43,31 @@ pub(crate) enum ChainEvent {
     Remove,
 }
 
+/// Drag payload of an effect row: its index in the chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct EffectDrag(pub usize);
 
+/// Drag payload of a NAM row: the block's index in its path's stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NamDrag(pub usize);
 
+/// What a row's right-click menu offers, and how it moves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RowMenu {
+    /// A built-in stage: bypass only.
     Builtin,
-    /// A built-in stage that is on or off, out of the chain when off (the
-    /// pitch shifter, whose bypass lives in its sheet).
-    Switch,
+    /// A plugin effect: editor, controls, move, remove, and drag.
     Effect,
+    /// A NAM block: move and remove, and drag.
     Nam,
 }
 
+/// The mark at the right of a row.
 #[derive(Clone, Copy)]
 pub(crate) enum ChainMark<'a> {
+    /// Mini EQ curve, hidden when the row's `show_curve` is false.
     Eq(&'a EqSettings),
+    /// Gate threshold, already formatted.
     Threshold(&'a str),
     /// Effect latency, already formatted.  An empty string draws nothing.
     Latency(&'a str),
@@ -52,6 +76,7 @@ pub(crate) enum ChainMark<'a> {
     Label(&'a str),
 }
 
+/// What one row shows.  The strings are borrowed for the frame.
 pub(crate) struct ChainRow<'a> {
     /// What screen readers call the row, and what it shows unless `shown`
     /// says otherwise.
@@ -77,10 +102,6 @@ pub(crate) struct ChainRow<'a> {
 impl ChainRow<'_> {
     fn effect(&self) -> bool {
         matches!(self.menu, RowMenu::Effect)
-    }
-
-    fn switched(&self) -> bool {
-        matches!(self.menu, RowMenu::Switch)
     }
 
     fn movable(&self) -> bool {
@@ -135,7 +156,7 @@ pub(crate) fn chain_row(ui: &mut egui::Ui, row: &ChainRow<'_>) -> egui::Response
         match row.menu {
             RowMenu::Effect => response.dnd_set_drag_payload(EffectDrag(row.index)),
             RowMenu::Nam => response.dnd_set_drag_payload(NamDrag(row.index)),
-            RowMenu::Builtin | RowMenu::Switch => {}
+            RowMenu::Builtin => {}
         }
         event = event.or(arrows(ui, &response));
     }
@@ -145,12 +166,6 @@ pub(crate) fn chain_row(ui: &mut egui::Ui, row: &ChainRow<'_>) -> egui::Response
         RowMenu::Nam => response.context_menu(|ui| nam_menu(ui, &mut event)),
         RowMenu::Builtin => response.context_menu(|ui| {
             if menu_item(ui, "Bypass") {
-                event = Some(ChainEvent::Bypass);
-                ui.close();
-            }
-        }),
-        RowMenu::Switch => response.context_menu(|ui| {
-            if menu_item(ui, if row.on { "Turn off" } else { "Turn on" }) {
                 event = Some(ChainEvent::Bypass);
                 ui.close();
             }
@@ -170,10 +185,6 @@ pub(crate) fn chain_row(ui: &mut egui::Ui, row: &ChainRow<'_>) -> egui::Response
         "Didn't load"
     } else if row.paused {
         "Paused"
-    } else if row.switched() {
-        // The pitch row's value is its state or shift: "Bypass" must not
-        // read as "On".
-        mark_text(row).unwrap_or(if row.on { "On" } else { "Off" })
     } else if row.on {
         "On"
     } else {
@@ -187,17 +198,12 @@ pub(crate) fn chain_row(ui: &mut egui::Ui, row: &ChainRow<'_>) -> egui::Response
         Some(row.selected),
         Some(value.to_owned()),
     );
-    let (led_name, led_toggled) = if row.switched() {
-        (format!("{} on", row.name), row.on)
-    } else {
-        (format!("Bypass {}", row.name), !row.on)
-    };
     row_info(
         &led_response,
         egui::Role::Button,
         ui.is_enabled(),
-        led_name,
-        Some(led_toggled),
+        format!("Bypass {}", row.name),
+        Some(!row.on),
         None,
     );
     if let (Some(shown), false) = (row.shown, row.failed) {
@@ -220,6 +226,8 @@ pub(crate) fn chain_row(ui: &mut egui::Ui, row: &ChainRow<'_>) -> egui::Response
     response
 }
 
+/// The event stored for `response` this frame, if the row did something
+/// other than a drag.
 pub(crate) fn chain_event(response: &egui::Response) -> Option<ChainEvent> {
     response.ctx.data(|data| data.get_temp(response.id))
 }

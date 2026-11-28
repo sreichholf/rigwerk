@@ -449,7 +449,7 @@ Settings are RON in eframe storage (`app/settings`).
 - Meters, scopes, and latency figures come from the live snapshot.
 - Screenshot runs use `--screenshot <file>` and `RIGWERK_PAGE`
   (`console`, `tuner`, `setup`). `devices` and `guide` open Setup; anything
-  else opens the console. `RIGWERK_SHEET` (`pitch`, `eq`, `gate`, `nam`, `cab`,
+  else opens the console. `RIGWERK_SHEET` (`eq`, `gate`, `nam`, `cab`,
   `effect`, `path`, `output`, `match-paths`, `scope`, `diagnostics`) opens a
   sheet on the selected path and
   `RIGWERK_DRAWER` (`browser`, `issues`) a drawer.

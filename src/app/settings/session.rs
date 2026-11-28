@@ -135,7 +135,6 @@ impl Session {
             eq: self.eq.unwrap_or(current.eq),
             eq_post: self.eq_post.unwrap_or(current.eq_post),
             gate: self.gate.unwrap_or(current.gate),
-            pitch: current.pitch,
             nam_blocks: current.nam_blocks.clone(),
             amp: current.amp.clone(),
             cab: current.cab.clone(),

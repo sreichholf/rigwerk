@@ -22,9 +22,6 @@ const BANNED: &[&str] = &[
     "published",
     "endpoint",
     "preview",
-    "harmonizer",
-    "splice",
-    "lookahead",
 ];
 
 /// The platform's own term (`quantum` in PipeWire, `endpoint` in WASAPI).

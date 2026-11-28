@@ -805,31 +805,3 @@ fn a_layout_with_no_path_fed_by_the_input_adds_empty_ones() {
     assert_eq!(app.return_slots().len(), 2);
     assert_eq!(app.path_count(), MAX_PATHS);
 }
-
-#[test]
-fn the_pitch_shifter_counts_as_a_stage_except_on_a_return() {
-    use crate::audio::{PathFeed, PitchSettings};
-    let mut app = blank_app();
-    assert_eq!(app.path_infos()[0].stages, 0);
-    app.set_path_pitch(PitchSettings {
-        enabled: true,
-        semitones: -2,
-        cents: f32::NAN,
-        ..PitchSettings::default()
-    });
-    assert_eq!(app.path().mix.pitch.cents, 0.0, "clamped on the way in");
-    assert_eq!(app.path().mix.pitch.semitones, -2);
-    assert_eq!(app.path_infos()[0].stages, 1);
-    app.push_paths_to_engine();
-    assert_eq!(app.engine.shared.path(0).mix().pitch, app.path().mix.pitch);
-    app.path_mut().mix.feed = PathFeed::Sends;
-    assert_eq!(app.path_infos()[0].stages, 0, "a return never runs it");
-    // The figure is the DSP's own at the shown rate: about 4 ms.
-    let rate = app.sample_rate.max(1);
-    let want = crate::audio::pitch_latency_samples(rate, 4.0) as f32 * 1000.0 / rate as f32;
-    assert_eq!(app.pitch_latency_ms(4.0), want);
-    assert!((3.9..4.5).contains(&want), "{want} ms");
-    let want = crate::audio::pitch_latency_samples(rate, 20.0) as f32 * 1000.0 / rate as f32;
-    assert_eq!(app.pitch_latency_ms(20.0), want);
-    assert!((19.9..22.0).contains(&want), "{want} ms");
-}

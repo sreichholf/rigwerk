@@ -1,15 +1,86 @@
-//! Returns run after the input paths.  Each return taps a sender at the
-//! slowest live input path's latency minus that sender's, counting every
-//! live input path, so a send on or off does not move the alignment.  A
-//! feed change waits until the path gain is 0.
+//! Turning the ring into output frames, shared by every playback backend.
 //!
-//! The metronome is added after the safety ceiling and before mute.  The
-//! click-free copy, taken before the tick, is what a take records unless
-//! "Record the click" is on.
+//! The order, per frame:
+//! 1. The clock side (ring, dropout recovery, drift trimming, rate
+//!    conversion) runs once in [`OutputMixer`].  The PipeWire duplex path
+//!    skips it and takes the frame straight from the graph buffers.
+//! 2. The split: that one stereo frame goes into every live path slot fed
+//!    by the input ([`PathProcessor`]: routing, EQs, gate, plugin
+//!    effects).  The returns run after them, on their sends (see
+//!    "Returns").
+//! 3. The path gain: level, mute, solo and a removed path's fade-out, as
+//!    one ramp per path.  If any active path is soloed, the others fall
+//!    silent; a return is solo-safe.  A path that goes live while the
+//!    mixer plays fades in from
+//!    silence (only the mixer's first block adopts the gains outright), and
+//!    a path whose plugins were restored but not opened yet stays silent
+//!    rather than playing dry.  A removed path whose fade reached silence is
+//!    moved to inactive here, at the end of the block.
+//! 4. The master (level, mute) scales each path's frame, before
+//!    the alignment: it is shared by every path, but a master change reaches
+//!    a delayed path up to its alignment delay later on that device.  (Kept
+//!    there so one path stays bit-identical to the chain before paths.)
+//! 5. Alignment: each path's frame goes into that path's delay line; each
+//!    device mapper reads every path through its own tap, at the path's
+//!    alignment delay on that device (see `output_map`, "Alignment").  The
+//!    chain latencies are read once per block.
+//! 6. The sum: each device mapper maps every live path with that path's
+//!    channel map, level and polarity on that device and adds them per
+//!    channel, then applies the device level, the safety ceiling, the
+//!    metronome and the mute.  The tick is added after the ceiling and
+//!    before the mute, on that device's click mask, and a zero sample
+//!    does not write a lane.  It waits that device's largest alignment
+//!    delay first.  A plain stereo sum of the paths, after the
+//!    master but not aligned, feeds the master meters and the scope.
+//!    That sum does not include the metronome.
+//!    Each device frame also carries a click-free copy, taken after the
+//!    ceiling and before the tick, with the same mute and calibration
+//!    duck but no calibration click: what a take records unless "Record
+//!    the click" is on (see `record`).
+//!    On the ring path, each generic extra output's mapped frame goes into
+//!    that extra output's ring; its own stream plays it (see `extra_output`).
 //!
-//! A chunk with no chain runtime plays the chain input delayed by its
-//! latency, so the sum keeps its phase.  DSP time is one clock read per
-//! stage: no allocation, no lock.  The total peak is the worst block.
+//! # Returns
+//!
+//! A return (`PathFeed::Sends`) is not fed by the split.  Its chain runs
+//! after every path fed by the input has finished its block, on the sum of
+//! their sends: each sender's frame after its path gain (level, mute, solo
+//! and fade, taken per frame in [`PathProcessor::fill_gains`]), times its
+//! ramped send level.  Senders with different chain latencies would comb
+//! in that sum, so each sender's frames go into a send line and each
+//! return reads them through its own tap, at the return's slowest
+//! sender's latency minus the sender's: the sends line up with each other
+//! as the paths do on a device.  The wait counts every live path fed by
+//! the input, sending or not, so a send turned on or off does not move the
+//! alignment.  The return's latency for the device alignment is that wait
+//! plus its own chain's (`Shared::alignment_latencies` for the UI).  A
+//! sender whose sends are all off and settled writes no line.  A removed
+//! sender keeps running until its sends have played out of their taps.
+//! A path whose feed changes goes silent first and switches once its gain
+//! is at 0.  The master and the device maps treat a return like any path.
+//!
+//! The plugin chain of a path never drops out of the timing: a chunk that
+//! finds no chain runtime to run (rare: the UI applying an edit to the
+//! parked runtime at that moment) plays the chain's input delayed by its
+//! latency instead, so the sum keeps its phase; that chunk loses the
+//! effects' sound (see
+//! [`PathProcessor::run_effects`] and the `audio::path::plugins` module docs).
+//!
+//! Each path's chain (front, effects, back) runs as one piece per block
+//! and is timed with one monotonic clock read per path and stage (the
+//! vDSO / QPC clock `Instant` reads, as the drift relax timer already
+//! does; no allocation, no lock).  The smoothed time per block and the
+//! block's length are published per path (`PathControls::dsp_time`, with a
+//! peak that decays over [`path::DSP_PEAK_SECONDS`]) for Diagnostics.  The
+//! sum of every path's time in the same block is smoothed and peaked the
+//! same way and published as the total (`Shared::total_dsp`) for the Live
+//! overload issue: its peak is the worst block, not the sum of the paths'
+//! peaks, which may come from blocks seconds apart.  Both backends (the
+//! ring and the PipeWire duplex graph) publish it, through `finish_block`.
+//!
+//! One path at 0 dB (path and device level), unmuted, normal polarity is
+//! bit-identical to the chain before paths existed, while the sample stays
+//! under the safety ceiling: every unity gain is a copy, not a multiply.
 
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -42,8 +113,9 @@ use path::{DspMeter, PathProcessor};
 pub(crate) use ramp::Ramp;
 use ramp::{fade_down, fade_up, CONTROL_RAMP_SECONDS, DROPOUT_FADE_SECONDS};
 
-/// An empty ring repeats the last frame (resampler continuity) and sets
-/// `missed`.
+/// Takes the next frame from the bridge.  An empty ring returns the previous
+/// frame (so the resampler's window stays continuous) and marks the callback
+/// as late, so the mixer fades out and the buffer can grow for the next round.
 pub(crate) fn take_ring_frame(shared: &Shared, missed: &mut bool, last: (f32, f32)) -> (f32, f32) {
     match shared.pop_frame() {
         Some(pair) => pair,
@@ -54,64 +126,103 @@ pub(crate) fn take_ring_frame(shared: &Shared, missed: &mut bool, last: (f32, f3
     }
 }
 
+/// Turns the ring into output frames for any playback path (cpal, ASIO,
+/// REAL-style WASAPI or PipeWire): dropout recovery, drift trimming and
+/// conversion from whatever rate the input really runs at (the clock side,
+/// once), then each active signal path ([`PathProcessor`]), the sum, the
+/// master level and mute, and last each output device's channel map, level
+/// and mute.
 pub(crate) struct OutputMixer {
     output_rate: u32,
     source_rate: u32,
     resampler: FrameResampler,
     last: (f32, f32),
+    /// Playback gain around a dropout, 0..=1.  It is 1 while the ring
+    /// delivers.  On a dropout the last frame is held and this
+    /// falls to 0 over [`DROPOUT_FADE_SECONDS`] (into the re-priming silence
+    /// if the block ends first); when priming ends it rises back to 1 over
+    /// the same time.  It starts at 1, so a ring that is already full on the
+    /// first block plays straight away; a bridge that primes for a while
+    /// fades in from that silence like any other recovery.  Both ends snap,
+    /// so float rounding never leaves a finished fade a hair short of 0 or 1.
     fade_gain: f32,
+    /// The frame held while fading out after a dropout.
     held: (f32, f32),
-    /// A full ring before the first frame starts at full level.
+    /// Whether any ring frame has been played yet.  Only a ring that is full
+    /// before the first frame starts at full level instead of fading in.
     played: bool,
-    /// The rest of this block fades the held frame; trickle is ignored.
+    /// A dropout in this block.  The rest of the block fades the held
+    /// frame out instead of picking up whatever trickles in meanwhile; the
+    /// next block re-primes as before.
     dropping: bool,
     priming: bool,
     started: bool,
-    // Steers the ratio from ring fill instead of splicing frames.  The
-    // integral is the learned clock offset.  `drift_error` is `None` until
+    // Drift correction steers the resampler ratio from the ring-fill error
+    // instead of dropping or repeating frames.  `drift_ppm` is the value the
+    // resampler was last trimmed by, reported to the UI as the clock offset;
+    // `drift_integral` is the slow part of the loop, which holds the learned
+    // clock offset; `drift_error` is the low-passed fill error, `None` until
     // the first reading after priming.
     drift_ppm: f32,
     drift_integral: f32,
     drift_error: Option<f32>,
-    /// Switching to or from the 1:1 bypass resets the resampler.
+    /// Whether the last block went through the resampler.  Switching between
+    /// it and the 1:1 bypass resets it, so it never replays stale history.
     resampling: bool,
     stable_since: Instant,
+    /// One chain per path slot; only the `live` ones run.
     paths: [PathProcessor; MAX_PATHS],
+    /// The slots that run in the current block, read once at its start.
     live: LiveSlots,
-    /// One line per path, after the master.  Each device taps it.
+    /// One delay line per path slot: each live path's frame after the
+    /// master is written here, and every device mapper reads it through its
+    /// own alignment tap.
     lines: PathLines,
-    /// Sender frames after path gain.  Written only while a send is on.
+    /// Each sender's frames after its path gain, for the returns (see
+    /// "Returns").  Written only while the sender has a send on.
     send_lines: [DelayLine; MAX_PATHS],
-    /// `[sender][return]`: the tap onto the slowest sender.
+    /// `[sender][return]`: the tap that lines the sender up with the
+    /// return's slowest sender, and the ramped send level.
     send_taps: [[DelayTap; MAX_PATHS]; MAX_PATHS],
-    /// `[sender][return]` send level.
     send_levels: [[Ramp; MAX_PATHS]; MAX_PATHS],
-    /// Mute and level as one ramp, so either can move without a step.
+    /// The master: mute and the output level folded into one effective
+    /// gain, ramped per sample so they compose without a step.
     gain: Ramp,
-    /// The first block snaps, so the bridge does not fade from defaults.
+    /// The first block adopts the live master gain directly.
     gain_adopted: bool,
+    /// The clock output's channel map, level and mute, after the master.
     device: DeviceMapper,
-    /// Duplex pairs, or a generic extra output's channels into its ring.
-    /// Only the first `live_extra_outputs` are written.
+    /// Extra output devices: stereo port pairs on the PipeWire duplex graph,
+    /// or a generic extra output's device channels, mapped here and pushed into
+    /// its ring.  Only the first `live_extra_outputs` slots are written each
+    /// block.
     extra_outputs: [DeviceMapper; MAX_EXTRA_OUTPUTS],
+    /// `shared.extra_output_count()` as read at the start of the block.
     live_extra_outputs: usize,
-    /// Ring-path feeds this block, with the ring generation latched at
-    /// the start.
+    /// The generic extra outputs whose rings this block feeds (ring path only;
+    /// see [`Shared::feeds_extra_output`]), with the ring's layout generation
+    /// as read at the start of the block.
     feeding: [Option<u64>; MAX_EXTRA_OUTPUTS],
+    /// Every live path's DSP time per block together (`Shared::total_dsp`).
     total_dsp: DspMeter,
-    /// Clock-output duck and click.  Only this callback touches it.
+    /// The measured-round-trip duck and click on the clock output.  Only this
+    /// callback touches it; the armed state itself is on `Shared`.
     calibration: CalibrationEmitter,
-    /// One click for every device.  An extra-output mixer has none: the
-    /// tick is already in the lanes.
+    /// One click for every device.  Each mapper adds the sample on its own
+    /// mask.  Not on an extra output mixer: the tick is already in the lanes.
     metronome: Metronome,
-    /// A measurement ducks each mapper after its click line, not here.
+    /// Click level.  The first block snaps, then it ramps with the master.
+    /// A measurement does not move it: each mapper ducks the tick after its
+    /// click line (`duck_click`).
     click_gain: Ramp,
     click_adopted: bool,
-    /// Rate the beat phase was scaled to.  0 until the first block.
+    /// Output rate the in-beat phase and interval were scaled to.  0 until
+    /// the first block.
     click_rate: u32,
 }
 
 impl OutputMixer {
+    /// A mixer for an output device with `device_channels` channels.
     pub(crate) fn new(output_rate: u32, device_channels: usize) -> Self {
         let output_rate = output_rate.max(1);
         Self {
@@ -131,7 +242,7 @@ impl OutputMixer {
             drift_error: None,
             resampling: false,
             stable_since: Instant::now(),
-            paths: std::array::from_fn(|slot| PathProcessor::new(output_rate, slot)),
+            paths: std::array::from_fn(|_| PathProcessor::new(output_rate)),
             live: LiveSlots::default(),
             lines: std::array::from_fn(|_| DelayLine::new(MAX_ALIGN_DELAY as usize)),
             send_lines: std::array::from_fn(|_| DelayLine::new(MAX_ALIGN as usize)),
@@ -140,8 +251,8 @@ impl OutputMixer {
             gain: Ramp::new(1.0),
             gain_adopted: false,
             device: DeviceMapper::new(device_channels),
-            // A duplex extra output is a stereo pair.  A generic one takes
-            // its device's count when its ring starts.
+            // A PipeWire extra output is a stereo port pair; a generic extra output
+            // takes its device's count when its ring starts.
             extra_outputs: std::array::from_fn(|_| DeviceMapper::new(2)),
             live_extra_outputs: 0,
             feeding: [None; MAX_EXTRA_OUTPUTS],
@@ -154,7 +265,8 @@ impl OutputMixer {
         }
     }
 
-    /// Parks every chain so a test can take one before the next block.
+    /// Parks every path's chain runtime, as a mixer that goes away does,
+    /// so a test can take one before the next block.
     #[cfg(test)]
     pub(crate) fn park_chains_for_test(&mut self) {
         for path in &mut self.paths {
@@ -162,13 +274,15 @@ impl OutputMixer {
         }
     }
 
-    /// Publishes the device channel count.  Call outside the callback.
+    /// Publishes the output device's channel count.  Call when the stream
+    /// opens, outside the callback, so the snapshot has it at once.
     pub(crate) fn publish_device_channels(&self, shared: &Shared) {
         self.device.publish_channels(&shared.clock_output);
     }
 
-    /// Duplex extra outputs are stereo pairs.  A generic extra output's
-    /// stream publishes its own count.
+    /// Publishes each live extra output's channel count as this mixer maps it:
+    /// a stereo port pair on the PipeWire duplex graph.  (A generic
+    /// extra output's stream publishes its device's count when it opens.)
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn publish_extra_output_channels(&self, shared: &Shared) {
         let count = shared.extra_output_count();
@@ -177,16 +291,29 @@ impl OutputMixer {
         }
     }
 
-    /// Grows every path's scratch before the callback, so a block never
-    /// allocates.  A larger host block still renders; debug asserts it.
+    /// Grows the per-block scratch of every path while the bridge is still
+    /// opening, so the first callback (and the first block after a plugin or
+    /// a path is added) never has to allocate.  This size is what every block
+    /// must fit: a host that later hands over a larger one still gets that
+    /// block rendered (release grows the scratch once), but the block would
+    /// allocate in the callback, so [`Self::begin_block`] asserts it.
     pub(crate) fn prepare(&mut self, frames: usize) {
         for path in &mut self.paths {
             path.prepare(frames);
         }
     }
 
-    /// Installs the kernel the rate publisher planned.  Until it arrives
-    /// the mixer keeps its pair: the callback must not build one.
+    /// Follows the input's real rate.  It is only known once the input has
+    /// opened, and an input that could not take the requested rate reports
+    /// its own here.
+    ///
+    /// The new kernel is planned by the rate publisher and handed over in
+    /// [`Shared::clock_kernel`]; this only installs it (see
+    /// [`super::resampler::KernelHandoff::try_adopt`]).  While it is not
+    /// ready the mixer keeps
+    /// its current pair and keeps playing: the pitch is off by the rate
+    /// difference for the few blocks until the table arrives, rather than the
+    /// block rebuilding it.
     pub(crate) fn follow_source_rate(&mut self, shared: &Shared) {
         let source = self.followed_source(shared);
         if source == self.source_rate {
@@ -201,6 +328,7 @@ impl OutputMixer {
         }
     }
 
+    /// The source rate the mixer should run at, from `Shared`.
     fn followed_source(&self, shared: &Shared) -> u32 {
         match shared.source_rate.load(Ordering::Relaxed) {
             0 => self.output_rate,
@@ -208,7 +336,8 @@ impl OutputMixer {
         }
     }
 
-    /// Builds the source filter on the setup thread.  A callback adopts a
+    /// Builds the filter for the source rate `Shared` already published.  Call
+    /// it on the setup thread before the stream starts; a callback adopts a
     /// planned table instead.
     pub(crate) fn configure_source_rate(&mut self, shared: &Shared) {
         let source = self.followed_source(shared);
@@ -222,17 +351,23 @@ impl OutputMixer {
         self.drift_error = None;
     }
 
+    /// For tests: how many kernels the resampler built.
     #[cfg(test)]
     pub(crate) fn configure_calls(&self) -> usize {
         self.resampler.configure_calls()
     }
 
+    /// The rate pair the resampler is playing, for tests.
     #[cfg(test)]
     pub(crate) fn resampler_pair(&self) -> (u32, u32) {
         self.resampler.pair()
     }
 
-    /// Trims the ratio from ring fill.  The integral holds the clock offset.
+    /// Steers the conversion ratio from the ring-fill error.  A fill above
+    /// the target makes the resampler consume source frames a little faster,
+    /// one below it a little slower; the integral term learns the steady
+    /// clock offset.  Returns the applied correction in ppm, which is zero
+    /// whenever drift is off or the ring is still priming.
     fn steer_drift(&mut self, shared: &Shared, target: usize, seconds: f32, drift: bool) -> f32 {
         if !drift {
             self.drift_ppm = 0.0;
@@ -241,13 +376,16 @@ impl OutputMixer {
             return 0.0;
         }
         if self.priming {
-            // The integral stays.  Clearing it makes a small buffer
-            // drop out again.
+            // Nothing is drained while priming.  The learned clock offset in
+            // the integral stays: the clocks have not changed, and keeping it
+            // is what stops a small bridge buffer from having another dropout.
             self.drift_ppm = 0.0;
             self.drift_error = None;
             return 0.0;
         }
-        // Seconds of fill, so the gains do not depend on rate or block size.
+        // Fill error as seconds of audio, so the gains do not depend on the
+        // rate or the block size.  The loop works in ratio units and only
+        // converts to ppm for the resampler and the readout.
         let raw = (shared.ring_frames() as f32 - target as f32) / self.source_rate as f32;
         let error = match self.drift_error {
             Some(filtered) => {
@@ -264,15 +402,17 @@ impl OutputMixer {
         self.drift_ppm
     }
 
-    /// Applies UI changes for this block.  `frames` must fit
-    /// [`Self::prepare`]: the scratch grows inside the callback.
+    /// Picks up every UI change made since the last block: which slots
+    /// are live, each live path's chain settings, the master gain and the
+    /// device controls.  Makes room for `frames` in every live path; `frames`
+    /// must fit [`Self::prepare`], because the room is made inside the
+    /// callback.  Shared by the ring path and the direct path.
     fn begin_block(&mut self, shared: &Shared, frames: usize) {
         let samples = CONTROL_RAMP_SECONDS * self.output_rate as f32;
         self.live = shared.live_slots();
         for slot in 0..MAX_PATHS {
             if !self.live.contains(slot) {
                 self.paths[slot].release_chain();
-                self.paths[slot].skip_idle(frames);
             }
         }
         let any_solo = shared.any_solo();
@@ -284,8 +424,10 @@ impl OutputMixer {
         };
         for slot in self.live.iter() {
             let path = &mut self.paths[slot];
-            // Past the prepared size: release grows, debug stops.  Split
-            // with `render_chunk` when a driver can hand over more.
+            // Past the prepared size: release grows here, debug stops.  A
+            // backend that does not split a larger host block therefore ends
+            // a debug run on this assert; the release build grows and plays
+            // on.  Split with `render_chunk` when a driver can deliver one.
             debug_assert!(
                 frames <= path.block.len(),
                 "a block of {frames} frames does not fit the {} prepared",
@@ -303,7 +445,8 @@ impl OutputMixer {
                 self.lines[slot].reset();
                 self.send_lines[slot].reset();
             }
-            // Unclamped, so the report can flag a chain past MAX_ALIGN.
+            // Unclamped, so the report can flag a chain past MAX_ALIGN; the
+            // alignment itself clamps.
             timing.latency[slot] = path.latency_raw;
             path.reserve_block(frames);
         }
@@ -316,8 +459,11 @@ impl OutputMixer {
             self.gain.snap(gain);
             self.gain_adopted = true;
         }
-        // A measurement ducks the tick after the click line, so one
-        // already waiting fades with the ones not yet generated.
+        // The click level ramps like the master.  The first block snaps.
+        // A measurement ducks the tick in each mapper, after its click line
+        // (`duck_click`), so a tick already waiting out an alignment delay
+        // fades with the ones not yet generated.  The callback does not read
+        // the calibration atomic again until the next block.
         let ducking = shared.calibration.state().ducking();
         let click_gain = f32::from_bits(shared.metronome_gain.load(Ordering::Relaxed));
         if self.click_adopted {
@@ -340,8 +486,10 @@ impl OutputMixer {
         self.device
             .begin_paths(&shared.clock_output, samples, self.live, &timing, frames);
         self.device.duck_click(ducking, samples);
-        // Duplex extra outputs are in-graph; a generic one goes to its
-        // ring.  One without a stream maps nothing and its meters read 0.
+        // Every extra output is summed and mapped here, like the clock output:
+        // in-graph on the PipeWire duplex path, otherwise for a generic
+        // extra output's ring.  One without a running stream maps nothing and
+        // its meters read 0.
         self.live_extra_outputs = shared.extra_output_count();
         let direct = shared.direct.load(Ordering::Relaxed);
         for index in 0..self.live_extra_outputs {
@@ -362,8 +510,8 @@ impl OutputMixer {
             );
             self.extra_outputs[index].duck_click(ducking, samples);
             if !feeding && !direct {
-                // Nothing plays it, so there is no alignment to show.
-                // Duplex plays every extra output in-graph.
+                // Mapped, but nothing plays it: no alignment to show.  (The
+                // duplex graph plays every extra output in-graph.)
                 shared.extra_outputs[index].clear_alignment();
             }
         }
@@ -377,13 +525,16 @@ impl OutputMixer {
         }
     }
 
-    /// Lines each return's senders up and adds that wait to its latency.
+    /// Points every send at this block's level and lines up the senders
+    /// of each live return (see "Returns"), and adds each return's wait to
+    /// its latency in `timing`.  Only a live path fed by the input sends.
     fn begin_sends(&mut self, shared: &Shared, samples: f32, timing: &mut PathTiming) {
         let fade = TAP_FADE_SECONDS * self.output_rate as f32;
         for ret in 0..MAX_PATHS {
             let live_return = self.live.contains(ret) && self.paths[ret].is_return;
-            // Every live input path counts, sending or not, so a send on
-            // or off does not move the alignment.
+            // The wait counts every live path fed by the input, sending or
+            // not, so turning a send on or off never moves the alignment
+            // (as muting a path does not).
             let mut wait = 0;
             // A send that was silent starts at its delay instead of fading
             // its tap there.
@@ -419,8 +570,9 @@ impl OutputMixer {
         }
     }
 
-    /// Each return's block from its senders, after path gain.  Runs after
-    /// [`PathProcessor::fill_gains`].
+    /// Stages each live return's block from its senders' sends: each
+    /// sender's frame after its path gain, through its tap, at its send
+    /// level.  Runs after the senders' chains and [`PathProcessor::fill_gains`].
     fn mix_sends(&mut self, frames: usize) {
         let live = self.live;
         let Self {
@@ -471,8 +623,8 @@ impl OutputMixer {
         }
     }
 
-    /// One input frame into every live input path.  A return is staged
-    /// in [`Self::finish_block`].
+    /// Splits one input frame into every live path fed by the input.  Their
+    /// chains run in [`Self::finish_block`].  A return is staged there.
     #[inline]
     fn stage_front(&mut self, index: usize, left: f32, right: f32) {
         for slot in self.live.iter() {
@@ -482,9 +634,19 @@ impl OutputMixer {
         }
     }
 
-    /// Fronts run before any plugin can change the float mode.  Returns
-    /// run after the paths they hear.  The tick is added in each mapper,
-    /// after the ceiling.
+    /// The chains for a block that `stage_front` filled: each live path's
+    /// front (routing, pre EQ, PRE gate), effects, POST gate and post EQ,
+    /// each path timed (its DSP time, see [`PathProcessor::publish_dsp`]:
+    /// one clock read per path and stage, no allocation, no lock) and the
+    /// block's total over every path published, then the master level on
+    /// each path's frame, the meters and the scope.  Each finished frame
+    /// goes to `write` with the clock output's mapped frame (after its duck
+    /// and any calibration click), the live extra outputs' mappers, every live
+    /// path's frame (the mappers sum them), the stereo sum of the paths'
+    /// taps, and the metronome sample.  The tick is added inside each
+    /// mapper, after the ceiling and before mute, on that device's click
+    /// mask.  A zero sample does not write a lane.  The frame counter
+    /// advances at the end of the block.
     fn finish_block(
         &mut self,
         shared: &Shared,
@@ -509,9 +671,11 @@ impl OutputMixer {
             }
         }
 
-        // A plugin may have cleared FTZ; the POST gate, post EQ and master
-        // still need it.  Dropped before the caller's guard, so the
-        // original mode returns last.  Callers hold the `RtGuard`.
+        // A plugin may have cleared flush-to-zero; the POST gate, post EQ
+        // and the master still decay into silence and need it.  Dropped
+        // before the caller's guard, so the thread's original mode still
+        // comes back last.  No `RtGuard` here: the callers (`render_with`,
+        // `render_direct_with`) hold one around this whole block.
         let _post_denormals = DenormalGuard::new();
         mark = Instant::now();
         let mut total_ns = 0u64;
@@ -543,7 +707,8 @@ impl OutputMixer {
                     mark = self.paths[slot].add_dsp_time(mark, Instant::now());
                 }
             }
-            // The returns' effects may have cleared FTZ again.
+            // The returns' effects may have cleared it again.  Their
+            // `finish_block` runs inside the same caller's `RtGuard`.
             let _return_denormals = DenormalGuard::new();
             mark = Instant::now();
             for slot in live.iter() {
@@ -564,24 +729,28 @@ impl OutputMixer {
         let extra_outputs = &mut self.extra_outputs[..self.live_extra_outputs];
         let mut peak_l = 0.0f32;
         let mut peak_r = 0.0f32;
-        // The click is after the device map, so its level ignores the
-        // faders.  Meters see the same duck.
+        // An armed measurement ducks the clock output and plays its click
+        // after the device map, so the fixed click level does not depend on
+        // the master or the device fader.  The scope and meters see the same
+        // duck, so the Live page shows the muted path while it measures.
         let (duck_target, duck_step) =
             self.calibration
                 .begin(&shared.calibration, self.output_rate, now);
         for index in 0..frames {
-            // Master before the maps, so one path is `(x * gain) * weight`.
+            // Mute and the level are one ramp, so either can move without
+            // a step.  It scales each path before the device maps sum them,
+            // so one path is exactly `(x * gain) * weight`.
             let gain = self.gain.next();
             let (duck, click) = self
                 .calibration
                 .next(&shared.calibration, duck_target, duck_step);
-            // Starts from the first path's frame, so one path passes bit
-            // for bit.
+            // The stereo sum for the meters and the scope.  It starts from
+            // the first path's frame itself, so one path passes bit for bit.
             let mut sum: Option<[f32; 4]> = None;
             for slot in live.iter() {
                 let path = &mut self.paths[slot];
                 let mut out = path.block[index];
-                // Unity copies.
+                // Path level, mute, solo and fade; unity copies.
                 let path_gain = path.gains[index];
                 if path_gain != 1.0 {
                     for value in out.iter_mut() {
@@ -613,9 +782,12 @@ impl OutputMixer {
             peak_l = peak_l.max(out[0].abs());
             peak_r = peak_r.max(out[1].abs());
             shared.push_scope_out(out[0], out[1]);
-            // Not in the path sum.  The same sample goes to every device.
-            // A sounding click finishes; the duck ramp, not a gate, takes
-            // it out.  Exact 0 is not multiplied.
+            // The metronome is not in the path sum above.  Advance it, then
+            // hand the same sample to every device.  Stopping leaves a click
+            // that is already sounding to finish; each mapper's duck ramp,
+            // not a hard gate, takes it out for a measurement.  A silent
+            // voice or a settled gain of 0 stays exact 0 and is not
+            // multiplied.
             let voice = self.metronome.next();
             let tick_gain = self.click_gain.next();
             let tick = if voice == 0.0 || tick_gain == 0.0 {
@@ -631,8 +803,9 @@ impl OutputMixer {
             write(&clock, extra_outputs, index, &self.lines, out, tick);
         }
 
-        // Beat and rhythm move together, so a pending change cannot show
-        // a beat the new bar does not have.
+        // The beat and the rhythm it belongs to move together.  A change
+        // that is still waiting for the next click keeps the old pair, so
+        // the Live strip cannot show a beat the new bar does not have.
         shared.publish_metronome_beat(self.metronome.beat(), self.metronome.rhythm() as u8);
 
         shared.frames.fetch_add(frames as u64, Ordering::Relaxed);
@@ -643,8 +816,10 @@ impl OutputMixer {
             self.extra_outputs[index].end_block(&shared.extra_outputs[index]);
         }
         shared.note_extra_output_producer_block(frames);
-        // A silent removed path keeps running until its taps and sends
-        // have played out.
+        // A removed path that has faded to silence keeps running until its
+        // delay lines have played out on every device (the taps still hold
+        // up to one alignment delay of it at full level), then stops from
+        // the next block.
         for slot in live.iter() {
             let path = &self.paths[slot];
             if !path.fading {
@@ -656,6 +831,9 @@ impl OutputMixer {
             }
             let drain = match path.drain {
                 Some(left) => left.saturating_sub(frames as u32),
+                // Went silent in this block: from here, the longest tap on
+                // the clock output or a live extra output still has to play
+                // out, and so does the longest of its sends into a return.
                 None => {
                     let sends = live
                         .iter()
@@ -679,8 +857,9 @@ impl OutputMixer {
         }
     }
 
-    /// [`Self::render_direct`] once per live device: index 0 is the clock
-    /// output, then each extra output.
+    /// Like [`Self::render_direct`], but each finished frame is handed over
+    /// once per live device: index 0 is the clock output, then each extra output.
+    /// Used by the PipeWire duplex/native multi-sink path.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn render_direct_devices(
         &mut self,
@@ -702,8 +881,10 @@ impl OutputMixer {
         );
     }
 
-    /// The direct path's rate.  Allocation-free: coefficients redesign on
-    /// the next block.
+    /// Follows the graph rate on the direct path, where input and output run
+    /// in the same callback at one rate.  Cheap and allocation-free, so it can
+    /// run on the audio thread: the EQ and gate redesign their coefficients on
+    /// the next block and the control ramps take the new rate.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn set_direct_rate(&mut self, rate: u32) {
         let rate = rate.max(1);
@@ -712,13 +893,18 @@ impl OutputMixer {
         }
         self.output_rate = rate;
         self.source_rate = rate;
+        // The next block re-reads every path's EQs and gate and `update`
+        // redesigns them for the new rate.
         for path in &mut self.paths {
             path.invalidate_settings();
         }
     }
 
-    /// One block from the same graph cycle.  Both sides share one clock,
-    /// so there is no ring, priming, drift or resampling.
+    /// Renders one block straight from an input block that arrived in the
+    /// same graph cycle: no ring, no bridge buffer, no priming, no drift steering
+    /// and no rate conversion, because both sides share one clock and rate.
+    /// Everything after the ring read is the same chain as [`Self::render`].
+    /// Each frame reaches `write` mapped onto the device's channels.
     #[allow(dead_code)] // Single-device direct path; duplex fans out via devices.
     pub(crate) fn render_direct(
         &mut self,
@@ -735,6 +921,8 @@ impl OutputMixer {
         );
     }
 
+    /// [`Self::render_direct`] handing over the four mixer taps instead of
+    /// the device frame.
     #[cfg(test)]
     fn render_direct_taps(
         &mut self,
@@ -756,11 +944,14 @@ impl OutputMixer {
         input_right: &[f32],
         write: impl WriteFrame,
     ) {
+        // The same flush-to-zero mode as `render`, for the EQ, gate and
+        // effects of this block.
         let _denormals = DenormalGuard::new();
         // Nothing in this block may allocate (see `audio::rt_guard`).
         let _no_allocations = RtGuard::enter();
-        // Stamped at entry, so calibration measures the frames, not when
-        // the effects finished.
+        // The block's clock stamp is taken here, at the callback's entry, so
+        // the calibration measures from the frames' position and not from
+        // when the effects happened to finish.
         let now = Instant::now();
         let frames = input_left.len().min(input_right.len());
         self.begin_block(shared, frames);
@@ -773,9 +964,12 @@ impl OutputMixer {
         shared.drift_ppm.store(0.0f32.to_bits(), Ordering::Relaxed);
     }
 
-    /// One host block, mapped onto the device.  A callback that splits a
-    /// larger block publishes it once with [`Self::note_host_block`] and
-    /// renders the pieces with [`Self::render_chunk`].
+    /// Renders `frames` output frames, handing each one to `write` mapped
+    /// onto the device's channels.  The backend only copies the frame into
+    /// its own buffer layout and sample format.  This publishes the block's
+    /// size for the bridge buffer floor; a callback that splits a larger host
+    /// block publishes it once with [`Self::note_host_block`] and renders the
+    /// pieces with [`Self::render_chunk`].
     pub(crate) fn render(
         &mut self,
         shared: &Shared,
@@ -788,8 +982,10 @@ impl OutputMixer {
         });
     }
 
-    /// One scratch-sized piece.  Publishes nothing: the floor follows the
-    /// whole host block ([`Self::note_host_block`]).
+    /// Renders one prepared-size piece of a host block the callback split to
+    /// fit the scratch.  Unlike [`Self::render`] this publishes nothing: the
+    /// floor follows the whole host block, so the callback publishes that
+    /// once with [`Self::note_host_block`] before the pieces.
     pub(crate) fn render_chunk(
         &mut self,
         shared: &Shared,
@@ -801,9 +997,12 @@ impl OutputMixer {
         });
     }
 
-    /// The bridge-buffer floor follows the whole host block, in source
-    /// frames.  The first block is skipped: a start-up fill is several
-    /// times the steady step.
+    /// Publishes the whole host block this callback renders, in source
+    /// frames, once per callback before its pieces.  The bridge buffer floor
+    /// follows the host's block, not a scratch-sized piece.  The very first
+    /// block is skipped: a host fills its whole buffer once at start-up, and
+    /// sizing the bridge buffer from that one block would keep latency
+    /// several times higher than the steady step needs.
     pub(crate) fn note_host_block(&mut self, shared: &Shared, frames: usize) {
         let block_source_frames =
             (frames as u64 * self.source_rate as u64).div_ceil(self.output_rate as u64) as usize;
@@ -813,7 +1012,8 @@ impl OutputMixer {
         self.started = true;
     }
 
-    /// [`Self::render`] handing over the four taps.  Only 0/1 carry the mix.
+    /// [`Self::render`] handing over the four mixer taps (only 0/1 carry the
+    /// processed mix) instead of the device frame.
     #[cfg(test)]
     fn render_taps(
         &mut self,
@@ -826,6 +1026,8 @@ impl OutputMixer {
     }
 
     fn render_with(&mut self, shared: &Shared, frames: usize, mut write: impl WriteFrame) {
+        // Decaying EQ and gate states must not drop into the slow subnormal
+        // range; the effects run inside this block and get the same mode.
         let _denormals = DenormalGuard::new();
         // Nothing in this block may allocate (see `audio::rt_guard`).
         let _no_allocations = RtGuard::enter();
@@ -833,12 +1035,16 @@ impl OutputMixer {
         self.follow_source_rate(shared);
         self.begin_block(shared, frames);
         let drift = shared.drift_enabled.load(Ordering::Relaxed);
+        // The ring holds input frames; one rendered block drains this many.
         let block_source_frames =
             (frames as u64 * self.source_rate as u64).div_ceil(self.output_rate as u64) as usize;
         let target = shared.target_frames();
 
-        // A buffer cut far above the target is purged at once.  The
-        // resampler is not reset: its window crossfades the jump.
+        // A smaller bridge buffer chosen while playing takes effect at once instead
+        // of being trimmed one frame per block.  Normal input bursts never
+        // reach this far above the target.  The resampler is not reset here:
+        // its window holds at most about a millisecond, so the purge becomes
+        // a short crossfade through the kernel instead of a restart.
         if !self.priming {
             let excess_line = target * 2 + block_source_frames;
             let fill = shared.ring_frames();
@@ -851,24 +1057,32 @@ impl OutputMixer {
             }
         }
 
-        // Do not drain until the ring has filled, or playback dropouts.
-        // After a dropout, wait until the held frame has faded, so a refill
-        // does not jump off it.  A ring full before anything played starts
-        // at full level.
+        // Do not drain the ring before the input has had time to fill it,
+        // otherwise playback starts with a burst of dropouts.
+        // After a dropout the held frame must have faded out first (at most
+        // DROPOUT_FADE_SECONDS), so a quick refill fades in from silence
+        // instead of jumping from the half-faded held frame to new audio.
+        // Only a ring that is full before anything played starts at full level.
         let faded = self.fade_gain == 0.0 || !self.played;
         if self.priming && faded && shared.ring_frames() >= target {
             self.priming = false;
         }
 
-        // Trim the step instead of splicing.  A 1:1 bridge with drift on
-        // still interpolates, so the path exists when the clocks differ.
+        // Steer the conversion ratio rather than splicing frames: the
+        // resampler keeps running and its step is trimmed by a few ppm, so a
+        // clock offset becomes a tiny pitch offset instead of a click.  With
+        // drift off, the step is the exact base ratio.  A 1:1 bridge with
+        // drift on still goes through the interpolator so that path exists
+        // when the clocks start to differ.
         let seconds = frames as f32 / self.output_rate as f32;
         let drift_ppm = self.steer_drift(shared, target, seconds, drift);
         self.resampler.set_correction_ppm(drift_ppm);
         let needs_resample = self.resampler.active() || drift;
         if needs_resample != self.resampling {
-            // Entering must not reuse bypass history.  Leaving skips the
-            // frames fetched ahead (half the kernel), once.
+            // Entering the resampler must not reuse history from before the
+            // bypass; it restarts at the next ring frame.  Leaving it skips
+            // the few frames it had fetched ahead (half its kernel), once,
+            // when drift is switched off on a 1:1 bridge.
             self.resampler.reset();
             self.resampling = needs_resample;
         }
@@ -877,14 +1091,17 @@ impl OutputMixer {
         let fade_step = 1.0 / (DROPOUT_FADE_SECONDS * self.output_rate as f32).max(1.0);
         for index in 0..frames {
             let (left, right) = if self.priming || self.dropping {
+                // After a dropout: keep fading the held frame down, into
+                // the priming silence if it outlasts this block.  A silent
+                // held frame (or none yet) has nothing to fade.
                 self.fade_gain = if self.held == (0.0, 0.0) {
                     0.0
                 } else {
                     fade_down(self.fade_gain, fade_step)
                 };
                 let out = (self.held.0 * self.fade_gain, self.held.1 * self.fade_gain);
-                // Once silent, resume inside this block when the buffer
-                // is back.
+                // Once silent, resume as soon as the bridge buffer is back, inside
+                // this block, rather than waiting for the next one.
                 if self.priming && self.fade_gain == 0.0 && shared.ring_frames() >= target {
                     self.priming = false;
                 }
@@ -900,6 +1117,9 @@ impl OutputMixer {
                 };
                 self.last = frame;
                 if dry {
+                    // A dropout: hold this frame and fade it out
+                    // from wherever the gain is, instead of holding it at
+                    // full level and then dropping to silence.
                     missed = true;
                     self.dropping = true;
                     self.held = frame;
@@ -907,6 +1127,8 @@ impl OutputMixer {
                 } else {
                     self.played = true;
                     if self.fade_gain < 1.0 {
+                        // Back from a dropout: fade in instead of starting
+                        // on a step.
                         self.fade_gain = fade_up(self.fade_gain, fade_step);
                     }
                 }
@@ -914,6 +1136,8 @@ impl OutputMixer {
             };
             self.stage_front(index, left, right);
         }
+        // Each generic extra output gets its own sum of the paths, mapped onto
+        // its device channels, through its ring (see `extra_output`).
         let feeding = self.feeding;
         self.finish_block(
             shared,
@@ -935,7 +1159,8 @@ impl OutputMixer {
 
         if missed {
             shared.dropouts.fetch_add(1, Ordering::Relaxed);
-            // Grow the target instead of stuttering on every callback.
+            // Grow the target and rebuild the bridge buffer instead of stuttering
+            // on every callback.
             shared.raise_target_after_dropout();
             self.priming = true;
             // The held frame keeps fading through the priming silence.
@@ -958,9 +1183,13 @@ impl OutputMixer {
     }
 }
 
-/// Clock frame (ducked, with any calibration click), live extra-output
-/// mappers, path lines, the unaligned tap sum, and the tick.  Each mapper
-/// adds the tick after the ceiling; a zero tick writes nothing.
+/// Receives one finished frame: the clock output's mapped frame (already
+/// ducked and carrying any calibration click), the live extra outputs' mappers,
+/// the paths' delay lines (each holding the path's frame after the master as
+/// its newest entry) for the mappers to align and sum, the unaligned stereo
+/// sum of the paths' four taps, and the metronome sample.  The tick is added
+/// inside each mapper, after the ceiling and before mute, on that device's
+/// click mask.  A zero sample does not write a lane.
 trait WriteFrame: FnMut(&DeviceFrame, &mut [DeviceMapper], usize, &PathLines, [f32; 4], f32) {}
 
 impl<F> WriteFrame for F where

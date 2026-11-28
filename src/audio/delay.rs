@@ -1,21 +1,37 @@
-//! Latency alignment between paths, and the dry side of an effect.  Lines
-//! are sized once outside the callback; reads and writes never allocate.
-//! A delay change crossfades over [`TAP_FADE_SECONDS`] instead of jumping.
-//! A settled tap at delay 0 returns the frame just written, bit for bit.
+//! Preallocated stereo delay lines and crossfading read taps, for the
+//! latency alignment between signal paths and the dry side of a plugin
+//! effect.  A mono line carries the metronome tick through the same
+//! alignment.
+//!
+//! A [`DelayLine`] is a ring of stereo frames, sized once outside the
+//! callback; writing and reading never allocate.  [`MonoDelayLine`] is the
+//! same ring of single samples.  A [`DelayTap`] reads one
+//! line at a delay that can change while audio runs: a new delay never
+//! jumps, it crossfades linearly from the old read position to the new one
+//! over [`TAP_FADE_SECONDS`].  A settled tap reads the line as is, so a tap
+//! at delay 0 hands back exactly the frame just written, bit for bit.
 
-/// Tap move time.  Long enough not to click, short enough not to smear.
+/// How long a tap takes to move to a new delay.  Long enough that the
+/// crossfade does not click, short enough that a latency change settles
+/// before it is heard as a smear.
 pub(crate) const TAP_FADE_SECONDS: f32 = 0.015;
 
-/// [`Self::read`] at `back` 0 is the newest frame.  A [`Self::reset`] makes
-/// older frames read as silence, so a restarted path does not replay them.
+/// A ring of stereo frames.  [`Self::read`] at `back` 0 is the frame written
+/// last.  Frames older than what was written since the last
+/// [`Self::reset`] read as silence, so a restarted path never replays what
+/// the slot held before.
 pub(crate) struct DelayLine {
     frames: Box<[[f32; 2]]>,
+    /// Index of the frame written last.
     write: usize,
+    /// How many frames were written since the last reset (saturating at the
+    /// capacity).
     filled: usize,
 }
 
 impl DelayLine {
-    /// Allocates.  Call it outside the callback.
+    /// A line that can delay by up to `max_delay` frames (and hold
+    /// `max_delay + 1` frames).  Allocates; call it outside the callback.
     pub(crate) fn new(max_delay: usize) -> Self {
         Self {
             frames: vec![[0.0; 2]; max_delay + 1].into_boxed_slice(),
@@ -24,7 +40,8 @@ impl DelayLine {
         }
     }
 
-    /// No storage and no allocation.
+    /// A line with no storage: writes are dropped and every read is
+    /// silence.  Never allocates.
     pub(crate) fn empty() -> Self {
         Self {
             frames: Box::new([]),
@@ -33,12 +50,14 @@ impl DelayLine {
         }
     }
 
+    /// The longest delay this line can read.
     #[cfg(test)]
     pub(crate) fn max_delay(&self) -> usize {
         self.frames.len().saturating_sub(1)
     }
 
-    /// O(1): the audio thread may call it.
+    /// Forgets the history: every older frame reads as silence again.
+    /// O(1), so the audio thread may call it.
     pub(crate) fn reset(&mut self) {
         self.filled = 0;
     }
@@ -59,6 +78,8 @@ impl DelayLine {
         }
     }
 
+    /// The frame written `back` frames before the last one (0 = the last).
+    /// Silence past the history or the capacity.
     #[inline]
     pub(crate) fn read(&self, back: usize) -> [f32; 2] {
         if back >= self.filled {
@@ -73,15 +94,21 @@ impl DelayLine {
     }
 }
 
-/// [`DelayLine`] of one sample per frame.  Same rules.
+/// [`DelayLine`] with one sample per frame.  Same rules: sized once,
+/// [`Self::read`] at `back` 0 is the sample written last, and anything
+/// older than the last [`Self::reset`] reads as silence.
 pub(crate) struct MonoDelayLine {
     samples: Box<[f32]>,
+    /// Index of the sample written last.
     write: usize,
+    /// How many samples were written since the last reset (saturating at
+    /// the capacity).
     filled: usize,
 }
 
 impl MonoDelayLine {
-    /// Allocates.  Call it outside the callback.
+    /// A line that can delay by up to `max_delay` samples.  Allocates; call
+    /// it outside the callback.
     pub(crate) fn new(max_delay: usize) -> Self {
         Self {
             samples: vec![0.0; max_delay + 1].into_boxed_slice(),
@@ -90,11 +117,8 @@ impl MonoDelayLine {
         }
     }
 
-    pub(crate) fn max_delay(&self) -> usize {
-        self.samples.len().saturating_sub(1)
-    }
-
-    /// O(1): the audio thread may call it.
+    /// Forgets the history: every older sample reads as silence again.
+    /// O(1), so the audio thread may call it.
     pub(crate) fn reset(&mut self) {
         self.filled = 0;
     }
@@ -115,6 +139,8 @@ impl MonoDelayLine {
         }
     }
 
+    /// The sample written `back` samples before the last one (0 = the
+    /// last).  Silence past the history or the capacity.
     #[inline]
     pub(crate) fn read(&self, back: usize) -> f32 {
         if back >= self.filled {
@@ -129,15 +155,21 @@ impl MonoDelayLine {
     }
 }
 
-/// [`Self::next`]'s `back` is for a caller that writes a chunk, then reads.
+/// One read position on a [`DelayLine`] whose delay can move without a
+/// jump.  The delay is in frames; [`Self::next`] adds an extra `back`
+/// offset for callers that write a whole chunk before reading it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DelayTap {
-    /// New delay.  A fade reads it from the first sample, weighted by
-    /// `progress`.
+    /// The delay being read (the new one, during a crossfade).
     current: u32,
+    /// The delay faded away from, during a crossfade.
     previous: u32,
+    /// The delay asked for; a fade toward it starts with the next read once
+    /// the running one has ended.
     target: u32,
+    /// Crossfade progress 0..1 from `previous` to `current`; 1 when settled.
     progress: f32,
+    /// Progress per sample of the next fade.
     step: f32,
 }
 
@@ -158,11 +190,14 @@ impl DelayTap {
         }
     }
 
+    /// Moves to `delay` at once, dropping any running fade.
     pub(crate) fn snap(&mut self, delay: u32) {
         *self = Self::new(delay);
     }
 
-    /// A change during a fade waits, so a read blends at most two positions.
+    /// Points the tap at `delay`; the move crossfades over `fade_samples`.
+    /// A change asked for during a fade waits until that fade ends, so the
+    /// read is always a blend of at most two positions.
     pub(crate) fn set_target(&mut self, delay: u32, fade_samples: f32) {
         self.target = delay;
         self.step = if fade_samples > 1.0 {
@@ -172,12 +207,15 @@ impl DelayTap {
         };
     }
 
+    /// The delay this tap settles on.
     pub(crate) fn target(&self) -> u32 {
         self.target
     }
 
-    /// How far a line must still run.  The delay faded from counts only
-    /// while that fade runs.
+    /// The longest delay this tap reads or will read: how many frames a
+    /// line must keep running before what was written into it has all come
+    /// out through this tap.  The delay faded away from counts only while
+    /// that fade runs: a settled tap no longer reads it.
     pub(crate) fn longest(&self) -> u32 {
         let fading = if self.progress < 1.0 {
             self.previous
@@ -187,10 +225,14 @@ impl DelayTap {
         self.current.max(fading).max(self.target)
     }
 
+    /// Whether the tap reads one position (no fade running or pending).
     pub(crate) fn is_settled(&self) -> bool {
         self.progress >= 1.0 && self.target == self.current
     }
 
+    /// Reads one frame `back` frames before the line's last one, at the
+    /// tap's delay, and advances a running crossfade by one sample.  A
+    /// settled tap reads the line as is.
     #[inline]
     pub(crate) fn next(&mut self, line: &DelayLine, back: usize) -> [f32; 2] {
         let Some((current, previous, weight)) = self.advance() else {
@@ -204,6 +246,7 @@ impl DelayTap {
         ]
     }
 
+    /// [`Self::next`] on a mono line.
     #[inline]
     pub(crate) fn next_mono(&mut self, line: &MonoDelayLine, back: usize) -> f32 {
         let Some((current, previous, weight)) = self.advance() else {
@@ -214,7 +257,8 @@ impl DelayTap {
         old + (new - old) * weight
     }
 
-    /// `None` when settled.  Otherwise new delay, old delay, and new weight.
+    /// One sample of the crossfade: `None` when settled (read the current
+    /// delay as is), else the new and old delays and the new one's weight.
     #[inline]
     fn advance(&mut self) -> Option<(usize, usize, f32)> {
         if self.progress >= 1.0 {
@@ -231,12 +275,17 @@ impl DelayTap {
     }
 }
 
+/// How long [`Declick`] takes to fade out the step at a switch between two
+/// signals.
 pub(crate) const DECLICK_SECONDS: f32 = 0.002;
 
-/// Fades the step when the old signal is gone and cannot be crossfaded
-/// (a plugin stops, a chain misses a chunk).  The step is the gap from the
-/// extrapolated last two frames to the new first frame.  Only the click
-/// goes; the sound still changes.
+/// Smooths a hard switch between two signals that do not meet, where no
+/// crossfade is possible because the old one is gone (a plugin that stops
+/// running, a chain that misses a chunk): the step between where the old
+/// signal was heading (its last two frames, extrapolated) and the new
+/// signal's first frame is added back as an offset that fades to 0, so the
+/// output stays continuous.  Two signals that do meet get (almost) no
+/// offset.  The sound still changes; only the click goes.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Declick {
     offset: [f32; 2],
@@ -247,7 +296,7 @@ pub(crate) struct Declick {
 }
 
 impl Declick {
-    /// Call after every chunk.
+    /// Notes the frames just played (call it after every chunk).
     pub(crate) fn note(&mut self, left: &[f32], right: &[f32]) {
         let count = left.len().min(right.len());
         match count {
@@ -262,6 +311,8 @@ impl Declick {
         }
     }
 
+    /// Starts smoothing a switch to a signal whose first frame is `first`,
+    /// over `len` frames.
     pub(crate) fn start(&mut self, first: [f32; 2], len: u32) {
         let [prev, last] = self.history;
         let expected = [2.0 * last[0] - prev[0], 2.0 * last[1] - prev[1]];
@@ -274,6 +325,7 @@ impl Declick {
         self.remaining > 0
     }
 
+    /// One frame of the new signal, with what is left of the step added.
     #[inline]
     pub(crate) fn apply(&mut self, frame: [f32; 2]) -> [f32; 2] {
         if self.remaining == 0 {

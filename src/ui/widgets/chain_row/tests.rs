@@ -337,34 +337,3 @@ fn a_shown_text_takes_the_name_place_and_keeps_the_name_for_readers() {
     });
     assert_eq!(node_named(&tree, "Amp").description(), Some(long));
 }
-
-#[test]
-fn a_switched_row_reads_on_and_off_not_bypassed() {
-    let off = ChainRow {
-        on: false,
-        menu: RowMenu::Switch,
-        ..row("Pitch", ChainMark::Label("Off"))
-    };
-    let tree = accesskit_frame(|ui| {
-        chain_row(ui, &off);
-    });
-    assert_eq!(node_named(&tree, "Pitch").value(), Some("Off"));
-    assert_eq!(
-        node_named(&tree, "Pitch on").toggled(),
-        Some(Toggled::False),
-        "its LED switches it, it does not bypass it"
-    );
-}
-
-#[test]
-fn a_bypassed_pitch_row_reads_bypass_not_on() {
-    let bypassed = ChainRow {
-        on: true,
-        menu: RowMenu::Switch,
-        ..row("Pitch", ChainMark::Label("Bypass"))
-    };
-    let tree = accesskit_frame(|ui| {
-        chain_row(ui, &bypassed);
-    });
-    assert_eq!(node_named(&tree, "Pitch").value(), Some("Bypass"));
-}
