@@ -31,7 +31,13 @@ fn every_mode_takes_its_sizes_from_the_table() {
         assert_eq!(mode.spec(192_000).ns, 4 * base.ns);
         assert_eq!(mode.spec(384_000), mode.spec(192_000));
         assert_eq!(mode.spec(22_050), base);
+        assert!(base.ns <= base.short && base.short <= base.na);
+        assert_eq!(mode.spec(192_000).short, 4 * base.short);
     }
+    // A held note's window is twice an onset's.
+    assert_eq!(PitchMode::Fast.spec(48_000).na, 3072);
+    assert_eq!(PitchMode::Fast.spec(48_000).short, 1536);
+    assert_eq!(PitchMode::Balanced.spec(48_000).short, 2048);
     assert_eq!(PitchMode::Fast.spec(48_000).latency, 383);
     assert_eq!(PitchMode::Balanced.spec(48_000).latency, 511);
     assert_eq!(PitchMode::Quality.spec(48_000).latency, 1023);
@@ -116,7 +122,10 @@ fn resolved_chords_move_every_partial_and_leave_none() {
     let rate = 48_000;
     for (mode, freqs) in [
         (PitchMode::Fast, vec![300.0, 520.0]),
+        // Only a held note's long window resolves these.
+        (PitchMode::Fast, vec![110.0, 165.0, 220.0]),
         (PitchMode::Balanced, vec![196.0, 262.0, 330.0]),
+        (PitchMode::Balanced, vec![82.41, 123.48, 164.81]),
         (PitchMode::Quality, vec![82.41, 123.48, 164.81]),
     ] {
         let input: Vec<f32> = (0..(0.8 * rate as f64) as usize)
@@ -390,5 +399,44 @@ fn a_noise_floor_fits_no_peak_and_a_note_over_it_still_shifts() {
         assert!(shifter.spectral.peaks(mode.index()) > 0, "{mode:?}");
         let got = measured_pitch(&out, rate, target, target * 0.03);
         assert!(cents(got, target).abs() < 2.0, "{mode:?}: {got} Hz");
+    }
+}
+
+#[test]
+fn a_held_note_takes_the_long_window_and_an_onset_or_a_stop_the_short() {
+    let rate = 48_000;
+    let silence = vec![0.0f32; rate as usize / 2];
+    for mode in [PitchMode::Fast, PitchMode::Balanced] {
+        let index = mode.index();
+        let mut shifter = PitchShifter::new(rate, 0);
+        shifter.update(spectral(mode, -5), rate);
+        drive(&mut shifter, &silence, 128, |_, _| {});
+        assert!(!shifter.spectral.short(index), "{mode:?}: silence");
+        drive(&mut shifter, &sine(rate, 82.41, 0.01), 128, |_, _| {});
+        assert!(shifter.spectral.short(index), "{mode:?}: onset");
+        drive(&mut shifter, &sine(rate, 82.41, 0.5), 128, |_, _| {});
+        assert!(!shifter.spectral.short(index), "{mode:?}: held");
+        drive(&mut shifter, &silence[..rate as usize / 50], 128, |_, _| {});
+        assert!(shifter.spectral.short(index), "{mode:?}: stop");
+    }
+}
+
+#[test]
+fn at_zero_semitones_window_switches_still_pass_the_input() {
+    let rate = 48_000;
+    // Bursts with hard edges, so the frames keep switching windows.
+    let input: Vec<f32> = signal(rate, 1.0)
+        .iter()
+        .enumerate()
+        .map(|(i, &x)| if (i / 2400) % 3 == 0 { 0.0 } else { x })
+        .collect();
+    for mode in PitchMode::ALL {
+        let (out, _) = run_settings(&input, rate, spectral(mode, 0), 1, 128);
+        let worst = input
+            .iter()
+            .zip(&out)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 1e-4, "{mode:?}: reconstruction error {worst}");
     }
 }

@@ -7,7 +7,7 @@
 //! too.  Hops are offset by `slot · H / MAX_PATHS`, so the paths do not
 //! compute in one block.
 //!
-//! [`PitchShifter::new`] allocates every state for 192 kHz (about 6.2 MB).
+//! [`PitchShifter::new`] allocates every state for 192 kHz (about 7.7 MB).
 //! `update`, `begin_block`, and `process` do not: a rate or delay change
 //! fades out, recomputes inside that storage, and fades in.
 //!

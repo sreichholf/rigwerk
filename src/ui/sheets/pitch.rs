@@ -47,8 +47,8 @@ const ENGINE_HINTS: [&str; 2] = [
 const MODE_HINT: &str = "Spectral's resolution. Longer resolves lower notes and waits longer.";
 const MODE_NAMES: [&str; 4] = ["Fast", "Balanced", "Quality", "Ultra"];
 const MODE_HINTS: [&str; 4] = [
-    "Fast: the shortest delay. Resolves partials about 63 Hz apart.",
-    "Balanced (default): resolves partials about 47 Hz apart.",
+    "Fast: the shortest delay. Resolves partials about 31 Hz apart on a held note.",
+    "Balanced (default): resolves partials about 23 Hz apart on a held note.",
     "Quality: the best octave down. Resolves partials about 23 Hz apart.",
     "Ultra: the longest delay, about 40 ms. Resolves partials about 12 Hz apart; \
      attacks smear the most.",

@@ -151,7 +151,10 @@ and each strip shows a thin meter.
     little later.  Its *Mode* replaces *Delay*: *Fast* (about 8 ms),
     *Balanced* (about 11 ms, the default), *Quality* (about 21 ms, the
     best octave down) or *Ultra* (about 40 ms, the lowest notes apart;
-    attacks smear the most).  A longer mode resolves lower notes.  Changing the
+    attacks smear the most).  A longer mode resolves lower notes.  *Fast*
+    and *Balanced* look further back while a note holds and only a short
+    way around an attack or a stop, so a held low note stays steady
+    without smearing palm-mutes.  Changing the
     engine or the mode dips the path like switching on.
   - *Reset* restores shift, wet, delay, engine and mode; *On* / *Bypass* /
     *Off* stays.

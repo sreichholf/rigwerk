@@ -741,7 +741,7 @@ fn the_preallocation_stays_within_its_budget() {
     assert!((130.0..150.0).contains(&kb), "Tight {kb:.1} kB");
     // The module docs quote this figure.
     assert!(
-        (5.9..6.6).contains(&mb),
+        (7.4..8.0).contains(&mb),
         "{mb:.2} MB; update the //! of pitch.rs"
     );
 }

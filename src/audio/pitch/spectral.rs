@@ -17,6 +17,13 @@
 //! Phases are referenced to `t_ref`, the centre of the synthesis window
 //! (`Na − Ns/2 − 0.5` from the frame start, the FFT's origin).
 //!
+//! A long `Na` resolves low partials but keeps the last note in view, so
+//! a frame whose input is not steady over it (an onset or a stop) uses a
+//! shorter analysis window, zero-padded to `Na`.  Each frame's synthesis
+//! window is the Hann of `Ns` over its own analysis window, so any sequence
+//! of the two still overlap-adds to a constant (Mauler and Martin's
+//! switchable low-delay windows).
+//!
 //! [`SpectralStates::new`] allocates every mode at 192 kHz and builds the
 //! FFT plans and window tables once per process.  Nothing after it does.
 
@@ -30,6 +37,11 @@ use serde::{Deserialize, Serialize};
 use super::tight::rate_scale;
 
 const MAX_RATE: u32 = 192_000;
+/// The power ratio, either way, between the newest `2·Ns` samples and the
+/// rest of the frame that picks the short window (6 dB).  A shorter stretch
+/// takes a beating chord's trough for a stop; a longer one notices a stop
+/// late.
+const SWITCH_POWER: f32 = 4.0;
 /// A shift change glides in steps of one hop.
 const GLIDE_SECONDS: f32 = 0.020;
 
@@ -71,15 +83,17 @@ type Complex32 = Complex<f32>;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PitchMode {
-    /// The shortest delay; resolves partials about 63 Hz apart.
+    /// The shortest delay; resolves partials about 31 Hz apart while a note
+    /// holds, 63 Hz around an onset or a stop.
     Fast,
     /// The best octave down; resolves partials about 23 Hz apart.
     Quality,
     /// About 40 ms, Tight's longest delay; resolves partials about 12 Hz
     /// apart.
     Ultra,
-    /// The default; resolves partials about 47 Hz apart.  Last, because an
-    /// unknown name reads as it.
+    /// The default; resolves partials about 23 Hz apart while a note holds,
+    /// 47 Hz around an onset or a stop.  Last, because an unknown name reads
+    /// as it.
     #[default]
     #[serde(other)]
     Balanced,
@@ -90,6 +104,9 @@ pub enum PitchMode {
 pub(crate) struct Spec {
     /// Analysis window length.
     pub(crate) na: usize,
+    /// The analysis window of a frame that is not steady; `na` for a mode
+    /// that does not switch.
+    pub(crate) short: usize,
     /// FFT size, the power of two at or above `na`.
     pub(crate) n: usize,
     /// Synthesis window length.
@@ -101,9 +118,10 @@ pub(crate) struct Spec {
 }
 
 impl Spec {
-    const fn new(na: usize, ns: usize, hop: usize) -> Self {
+    const fn new(na: usize, short: usize, ns: usize, hop: usize) -> Self {
         Self {
             na,
+            short,
             n: na.next_power_of_two(),
             ns,
             hop,
@@ -134,21 +152,23 @@ impl PitchMode {
         }
     }
 
-    /// The sizes at 48 kHz: `Na`, `Ns`, `H`.
-    const fn base(self) -> (usize, usize, usize) {
+    /// The sizes at 48 kHz: `Na`, the short `Na`, `Ns`, `H`.  Quality and
+    /// Ultra do not switch: under a longer window their long `Ns` smears
+    /// palm-mutes whichever window a frame picks.
+    const fn base(self) -> (usize, usize, usize, usize) {
         match self {
-            PitchMode::Fast => (1536, 384, 96),
-            PitchMode::Balanced => (2048, 512, 128),
-            PitchMode::Quality => (4096, 1024, 256),
-            PitchMode::Ultra => (8192, 1920, 480),
+            PitchMode::Fast => (3072, 1536, 384, 96),
+            PitchMode::Balanced => (4096, 2048, 512, 128),
+            PitchMode::Quality => (4096, 4096, 1024, 256),
+            PitchMode::Ultra => (8192, 8192, 1920, 480),
         }
     }
 
     /// The DSP and the latency the UI shows both read this.
     pub(crate) fn spec(self, rate: u32) -> Spec {
         let scale = rate_scale(rate);
-        let (na, ns, hop) = self.base();
-        Spec::new(na * scale, ns * scale, hop * scale)
+        let (na, short, ns, hop) = self.base();
+        Spec::new(na * scale, short * scale, ns * scale, hop * scale)
     }
 }
 
@@ -213,7 +233,10 @@ struct Peak {
 struct ModeState {
     spec: Spec,
     fft: &'static FftPair,
-    windows: &'static Windows,
+    /// The long and the short analysis window.
+    windows: &'static [Windows; 2],
+    /// Whether the last frame used the short window.
+    short: bool,
     /// The input, a power of two at least `na` long.
     fifo: Vec<f32>,
     /// The overlap-add output, a power of two at least `ns` long.
@@ -275,13 +298,14 @@ struct ModeState {
 impl ModeState {
     /// Builds the state for `max` (the mode's largest sizes) and configures
     /// it for `windows` at `rate`.  Off the audio thread.
-    fn new(max: Spec, windows: &'static Windows, rate: u32) -> Self {
-        let spec = windows.spec;
+    fn new(max: Spec, windows: &'static [Windows; 2], rate: u32) -> Self {
+        let spec = windows[0].spec;
         let half = max.n / 2;
         let mut state = Self {
             spec,
             fft: fft_pair(spec.n),
             windows,
+            short: false,
             fifo: vec![0.0; max.na.next_power_of_two()],
             out: vec![0.0; max.ns.next_power_of_two()],
             frame: vec![Complex32::default(); max.n],
@@ -323,8 +347,8 @@ impl ModeState {
 
     /// Takes new sizes inside the preallocated storage and clears the state.
     /// No allocation.
-    fn configure(&mut self, windows: &'static Windows, rate: u32) {
-        let spec = windows.spec;
+    fn configure(&mut self, windows: &'static [Windows; 2], rate: u32) {
+        let spec = windows[0].spec;
         debug_assert!(spec.na <= self.fifo.len() && spec.ns <= self.out.len());
         debug_assert!(spec.n <= self.frame.len());
         self.spec = spec;
@@ -345,6 +369,7 @@ impl ModeState {
         self.fifo.fill(0.0);
         self.out.fill(0.0);
         self.have_prev = false;
+        self.short = false;
         self.n_prev = 0;
         self.holdoff = 0;
         self.reset_left = 0;
@@ -353,6 +378,11 @@ impl ModeState {
         self.dry_power = 0.0;
         self.trim = 1.0;
         self.trim_target = 1.0;
+    }
+
+    /// The analysis window of the current frame.
+    fn window(&self) -> &'static Windows {
+        &self.windows[usize::from(self.short)]
     }
 
     /// A non-finite value was seen: clear, and tell the shifter.
@@ -410,10 +440,11 @@ impl ModeState {
     /// One analysis/synthesis frame ending at the newest sample, added into
     /// the output ring.
     fn compute_frame(&mut self, scratch: &mut [Complex32]) {
-        let Spec { na, n, ns, .. } = self.spec;
+        let Spec {
+            na, n, ns, short, ..
+        } = self.spec;
         let half = n / 2;
         let fifo_mask = self.fifo.len() - 1;
-        let windows = self.windows;
 
         // The glide moves one step per hop and lands exactly on its target.
         if self.octaves != self.octaves_target {
@@ -426,6 +457,28 @@ impl ModeState {
         }
 
         let start = self.t.wrapping_sub(na - 1);
+        // The window: is the input steady over the long one?
+        let was_short = self.short;
+        let mut rising = false;
+        if short < na {
+            let split = na - 2 * ns;
+            let (mut old, mut new) = (0.0f32, 0.0f32);
+            for i in 0..na {
+                let x = self.fifo[start.wrapping_add(i) & fifo_mask];
+                if i < split {
+                    old += x * x;
+                } else {
+                    new += x * x;
+                }
+            }
+            let (old, new) = (old / split as f32, new / (2 * ns) as f32);
+            self.short = new > SWITCH_POWER * old || old > SWITCH_POWER * new;
+            rising = new > old;
+        }
+        // The two windows' spectra do not compare: on a switch the window's
+        // own edge is the onset or the drop.
+        let switched = self.short != was_short;
+        let windows = self.window();
         let mut energy = 0.0f32;
         for (i, (slot, w)) in self.frame[..na].iter_mut().zip(&windows.wa).enumerate() {
             let x = self.fifo[start.wrapping_add(i) & fifo_mask] * w;
@@ -466,14 +519,19 @@ impl ModeState {
             self.fault();
             return;
         }
-        let onset = !self.have_prev || (self.holdoff == 0 && flux > ONSET_FLUX * total);
+        let (onset_seen, drop_seen) = if switched {
+            (self.short && rising, self.short && !rising)
+        } else {
+            (flux > ONSET_FLUX * total, drop > OFFSET_DROP * prev_total)
+        };
+        let onset = !self.have_prev || (self.holdoff == 0 && onset_seen);
         if onset {
             self.holdoff = self.holdoff_frames;
             self.reset_left = self.transient_frames;
             self.region_left = self.transient_frames;
         } else {
             self.holdoff = self.holdoff.saturating_sub(1);
-            if self.have_prev && drop > OFFSET_DROP * prev_total {
+            if self.have_prev && drop_seen {
                 self.region_left = self.region_left.max(self.release_frames);
             }
         }
@@ -552,11 +610,12 @@ impl ModeState {
     /// maximum: two partials a few bins apart beat, and a bin between them
     /// can outgrow one of them for a frame.
     fn find_peaks(&mut self, max_power: f32) {
-        let Spec { na, n, .. } = self.spec;
+        let n = self.spec.n;
         let half = n / 2;
-        let near = (n / na).max(1);
+        let windows = self.window();
+        let near = (n / windows.support).max(1);
         let radius = 2 * near;
-        let absolute = (PEAK_ABSOLUTE_AMPLITUDE * 0.5 * self.windows.wa_sum).powi(2);
+        let absolute = (PEAK_ABSOLUTE_AMPLITUDE * 0.5 * windows.wa_sum).powi(2);
         let rank = &mut self.rank[..half - 1];
         rank.copy_from_slice(&self.power[1..half]);
         let middle = rank.len() / 2;
@@ -623,12 +682,12 @@ impl ModeState {
     /// Each peak's true frequency, its complex amplitude with the other
     /// peaks' lobes taken out, its synthesis phase and its target.
     fn track_peaks(&mut self, reset: bool, octaves: f32) {
-        let Spec { na, n, hop, .. } = self.spec;
+        let Spec { n, hop, .. } = self.spec;
         let half = n / 2;
         let ratio = (octaves as f64).exp2();
         let bin_rad = TAU / n as f64;
-        let radius = (n / na).max(1) as i64;
-        let windows = self.windows;
+        let windows = self.window();
+        let radius = (n / windows.support).max(1) as i64;
         let reach = windows.lobe_reach;
         let count = self.n_peaks;
 
@@ -653,7 +712,8 @@ impl ModeState {
             peak.k0 = k as f64 + delta;
             peak.amp = self.frame[k] / windows.lobe(-delta);
         }
-        let width = (n / na).max(1);
+        let width = (n / windows.support).max(1);
+        debug_assert!(width <= MAX_FIT_WIDTH);
         let mut isolated = [Complex32::default(); 2 * MAX_FIT_WIDTH + 1];
         let fit_floor = self.power[..=half].iter().copied().fold(0.0f32, f32::max) * FIT_FLOOR;
         for sweep in 0..FIT_SWEEPS {
@@ -756,7 +816,7 @@ impl ModeState {
     /// phase.  A lobe that reaches below DC writes its mirror image too.
     fn synthesise_peaks(&mut self) {
         let half = self.spec.n / 2;
-        let windows = self.windows;
+        let windows = self.window();
         let reach = windows.lobe_reach;
         for peak in &self.peaks[..self.n_peaks] {
             // The residual.
@@ -903,7 +963,9 @@ fn wrap(phase: f64) -> f64 {
 /// ([`windows_for`]).
 struct Windows {
     spec: Spec,
-    /// Length `na`: a long rise and a short fall.
+    /// How many of the newest samples `wa` covers: `na` or `short`.
+    support: usize,
+    /// Length `na`, zero before its support: a long rise and a short fall.
     wa: Vec<f32>,
     /// Length `ns`, under the last `ns` samples of the frame.
     ws: Vec<f32>,
@@ -936,18 +998,23 @@ const FIT_FLOOR: f32 = 1e-5;
 impl Windows {
     /// `wa · ws` is a Hann window of `ns`, scaled to overlap-add to 1 at the
     /// hop (perfect reconstruction at a ratio of 1).  The rise of `wa` is a
-    /// Hann's rising half over `na − ns/2`; its fall, like that of `ws`, is
-    /// the square root of the Hann's falling half.  Off the audio thread.
-    fn new(spec: Spec) -> Self {
+    /// Hann's rising half over `support − ns/2`; its fall, like that of `ws`,
+    /// is the square root of the Hann's falling half.  Off the audio thread.
+    fn new(spec: Spec, support: usize) -> Self {
         let Spec { na, n, ns, hop, .. } = spec;
+        debug_assert!(ns <= support && support <= na);
         let hann = |j: usize| -> f64 {
             let s = (std::f64::consts::PI * (j as f64 + 0.5) / ns as f64).sin();
             s * s
         };
-        let rise = na - ns / 2;
+        let pad = na - support;
+        let rise = support - ns / 2;
         let wa: Vec<f64> = (0..na)
             .map(|i| {
-                if i < rise {
+                if i < pad {
+                    0.0
+                } else if i - pad < rise {
+                    let i = i - pad;
                     let s = (std::f64::consts::FRAC_PI_2 * (i as f64 + 0.5) / rise as f64).sin();
                     s * s
                 } else {
@@ -961,15 +1028,18 @@ impl Windows {
             .map(|j| (hann(j) / (wa[na - ns + j] * cola)) as f32)
             .collect();
         let t_ref = (na - ns / 2) as f64 - 0.5;
-        let lobe_reach = (LOBE_BINS * n / na) as f64;
-        let steps = (LOBE_BINS * n / na) * LOBE_STEPS;
+        let lobe_reach = (LOBE_BINS * n / support) as f64;
+        let steps = (LOBE_BINS * n / support) * LOBE_STEPS;
         let lobe = (0..=steps + 1)
             .map(|j| {
                 let delta = j as f64 / LOBE_STEPS as f64;
                 let step = Complex::from_polar(1.0f64, -TAU * delta / n as f64);
                 let mut phasor = Complex::from_polar(1.0f64, TAU * delta * t_ref / n as f64);
                 let mut acc = Complex::new(0.0f64, 0.0);
-                for w in &wa {
+                for _ in 0..pad {
+                    phasor *= step;
+                }
+                for w in &wa[pad..] {
                     acc += phasor * *w;
                     phasor *= step;
                 }
@@ -986,6 +1056,7 @@ impl Windows {
             .collect();
         Self {
             spec,
+            support,
             wa_energy: wa.iter().map(|w| w * w).sum::<f64>() as f32,
             wa_sum: wa.iter().sum::<f64>() as f32,
             wa: wa.into_iter().map(|w| w as f32).collect(),
@@ -1065,21 +1136,27 @@ impl Windows {
     }
 }
 
-/// The windows of `mode` at `rate`, from a table built once per process for
-/// every mode at every scale.  The first call builds it (off the audio
-/// thread, from [`SpectralStates::new`]); later calls only read it.
-fn windows_for(mode: PitchMode, rate: u32) -> &'static Windows {
-    static TABLE: OnceLock<Vec<Windows>> = OnceLock::new();
+/// The long and the short windows of `mode` at `rate`, from a table built
+/// once per process for every mode at every scale.  The first call builds
+/// it (off the audio thread, from [`SpectralStates::new`]); later calls only
+/// read it.
+fn windows_for(mode: PitchMode, rate: u32) -> &'static [Windows; 2] {
+    static TABLE: OnceLock<Vec<[Windows; 2]>> = OnceLock::new();
     let table = TABLE.get_or_init(|| {
         PitchMode::ALL
             .iter()
-            .flat_map(|&mode| [48_000, 96_000, 192_000].map(|rate| Windows::new(mode.spec(rate))))
+            .flat_map(|&mode| {
+                [48_000, 96_000, 192_000].map(|rate| {
+                    let spec = mode.spec(rate);
+                    [Windows::new(spec, spec.na), Windows::new(spec, spec.short)]
+                })
+            })
             .collect()
     });
     let spec = mode.spec(rate);
     table
         .iter()
-        .find(|windows| windows.spec == spec)
+        .find(|windows| windows[0].spec == spec)
         .expect("every spec is in the table")
 }
 
@@ -1146,6 +1223,12 @@ impl SpectralStates {
     #[cfg(test)]
     pub(super) fn ran(&self) -> bool {
         self.modes.iter().any(|m| m.t != 0)
+    }
+
+    /// Whether `mode`'s last frame used the short window.
+    #[cfg(test)]
+    pub(super) fn short(&self, mode: usize) -> bool {
+        self.modes[mode].short
     }
 
     /// The peaks of `mode`'s last frame.
