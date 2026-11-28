@@ -375,7 +375,7 @@ fn a_rate_change_with_the_pitch_shifter_on_allocates_nothing() {
         }
         assert_eq!(
             shared.path(0).path_latency_samples(),
-            super::super::pitch::pitch_latency_samples(rate, 4.0),
+            super::super::pitch::pitch_latency_samples(Default::default(), rate),
             "@{rate}"
         );
     }

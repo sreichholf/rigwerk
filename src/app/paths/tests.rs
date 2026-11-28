@@ -826,10 +826,24 @@ fn the_pitch_shifter_counts_as_a_stage_except_on_a_return() {
     assert_eq!(app.path_infos()[0].stages, 0, "a return never runs it");
     // The figure is the DSP's own at the shown rate: about 4 ms.
     let rate = app.sample_rate.max(1);
-    let want = crate::audio::pitch_latency_samples(rate, 4.0) as f32 * 1000.0 / rate as f32;
-    assert_eq!(app.pitch_latency_ms(4.0), want);
+    let ms = |pitch| crate::audio::pitch_latency_samples(pitch, rate) as f32 * 1000.0 / rate as f32;
+    let tight = |delay_ms| PitchSettings {
+        delay_ms,
+        ..PitchSettings::default()
+    };
+    let want = ms(tight(4.0));
+    assert_eq!(app.pitch_latency_ms(tight(4.0)), want);
     assert!((3.9..4.5).contains(&want), "{want} ms");
-    let want = crate::audio::pitch_latency_samples(rate, 20.0) as f32 * 1000.0 / rate as f32;
-    assert_eq!(app.pitch_latency_ms(20.0), want);
+    let want = ms(tight(20.0));
+    assert_eq!(app.pitch_latency_ms(tight(20.0)), want);
     assert!((19.9..22.0).contains(&want), "{want} ms");
+    // Spectral is its mode's figure, whatever the delay: Balanced is
+    // about 10.6 ms.
+    let spectral = PitchSettings {
+        engine: crate::audio::PitchEngine::Spectral,
+        ..tight(40.0)
+    };
+    let want = ms(spectral);
+    assert_eq!(app.pitch_latency_ms(spectral), want);
+    assert!((10.0..12.0).contains(&want), "{want} ms");
 }

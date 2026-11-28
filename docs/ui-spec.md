@@ -586,8 +586,11 @@ the alignment does not move); *Semitones* (−12 to +12, a track with − and
 notes and power chords, longer for full chords); the latency in ms at the
 shown rate in the summary line, and what the shifter is for (attacks
 intact, best for single notes and power chords; full chords chorus, less
-with a longer delay); *Reset* (shift, wet and delay; keeps *On* /
-*Bypass* / *Off*).  Not
+with a longer delay); *Engine* *Tight* / *Spectral* (default *Tight*);
+for *Spectral*, *Mode* *Fast* / *Balanced* / *Quality* / *Ultra* (default
+*Balanced*) in place of *Delay*, the latency beside *Engine*;
+*Reset* (shift, wet, delay, engine and mode; keeps *On* / *Bypass* /
+*Off*).  An engine or mode change dips like switching on.  Not
 on a return: a path that becomes one closes the sheet.
 
 **Effect**: header *On* / *Bypass*, *Wet* (its default on hover), latency,

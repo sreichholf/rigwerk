@@ -929,7 +929,7 @@ fn pitch_on() -> super::super::pitch::PitchSettings {
 /// the delayed signal.
 #[test]
 fn a_path_with_the_pitch_shifter_lines_up_with_one_without() {
-    let latency = super::super::pitch::pitch_latency_samples(RATE, pitch_on().delay_ms);
+    let latency = super::super::pitch::pitch_latency_samples(pitch_on(), RATE);
     let (mut mixer, shared) = aligned_mixer(0, 0);
     let mut mix = shared.paths[0].mix();
     mix.pitch = pitch_on();
@@ -961,7 +961,7 @@ fn switching_the_pitch_shifter_off_drops_its_latency() {
     mixer.prepare(BLOCK);
     let mut clock = 0;
     let _ = run_left(&mut mixer, &shared, &mut clock, 4, signal);
-    let on = super::super::pitch::pitch_latency_samples(RATE, pitch_on().delay_ms);
+    let on = super::super::pitch::pitch_latency_samples(pitch_on(), RATE);
     assert_eq!(shared.paths[0].path_latency_samples(), 64 + on);
     mix.pitch.enabled = false;
     shared.paths[0].set_mix(&mix);
@@ -984,13 +984,19 @@ fn the_other_path_follows_a_pitch_delay_change() {
     mixer.prepare(BLOCK);
     let mut clock = 0;
     let _ = run_left(&mut mixer, &shared, &mut clock, 8, signal);
-    let before = pitch_latency_samples(RATE, pitch_on().delay_ms);
+    let before = pitch_latency_samples(pitch_on(), RATE);
     assert_eq!(shared.paths[0].path_latency_samples(), before);
     mix.pitch.delay_ms = PITCH_MAX_DELAY_MS;
     shared.paths[0].set_mix(&mix);
     let start = clock;
     let out = run_left(&mut mixer, &shared, &mut clock, 40, signal);
-    let after = pitch_latency_samples(RATE, PITCH_MAX_DELAY_MS);
+    let after = pitch_latency_samples(
+        super::super::pitch::PitchSettings {
+            delay_ms: PITCH_MAX_DELAY_MS,
+            ..pitch_on()
+        },
+        RATE,
+    );
     assert!(after > before);
     assert_eq!(shared.paths[0].path_latency_samples(), after);
     let report = shared.clock_output.alignment().expect("published");
@@ -1063,7 +1069,7 @@ fn a_keyed_gate_behind_the_pitch_shifter_opens_on_the_delayed_note() {
     // open when the note arrives would pass it at once.
     const START: usize = 8_192;
     const BURST: usize = 4_096;
-    let pitch = super::super::pitch::pitch_latency_samples(RATE, pitch_on().delay_ms) as usize;
+    let pitch = super::super::pitch::pitch_latency_samples(pitch_on(), RATE) as usize;
     let blocks = (START + BURST + pitch) / BLOCK + 24;
     let input = |n: usize| {
         if (START..START + BURST).contains(&n) {

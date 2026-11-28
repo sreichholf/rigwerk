@@ -8,8 +8,8 @@ use egui::{Align, Layout, RichText, Vec2};
 use crate::app::screen::format_ms;
 use crate::app::{LogTone, RigWerkApp};
 use crate::audio::{
-    PitchSettings, PITCH_MAX_CENTS, PITCH_MAX_DELAY_MS, PITCH_MAX_SEMITONES, PITCH_MIN_CENTS,
-    PITCH_MIN_DELAY_MS, PITCH_MIN_SEMITONES,
+    PitchEngine, PitchMode, PitchSettings, PITCH_MAX_CENTS, PITCH_MAX_DELAY_MS,
+    PITCH_MAX_SEMITONES, PITCH_MIN_CENTS, PITCH_MIN_DELAY_MS, PITCH_MIN_SEMITONES,
 };
 use crate::ui::fonts::Face;
 use crate::ui::theme::{font, palette, Palette, TypeRole};
@@ -22,10 +22,12 @@ const ROW_H: f32 = 28.0;
 const MAX_CONTROLS_W: f32 = 640.0;
 
 pub(crate) const RESET_HINT: &str =
-    "Restore the shift, wet and delay to the defaults. On, Bypass and Off are kept.";
+    "Restore the shift, wet, delay, engine and mode to the defaults. On, Bypass and Off are kept.";
 
 pub(crate) const USE_HINT: &str = "Attacks stay intact. Best for single notes and power chords; \
      full chords chorus, less with a longer delay.";
+const SPECTRAL_USE_HINT: &str = "Keeps every chord clean. Attacks soften and arrive a little \
+     later; a longer mode resolves lower notes.";
 
 pub(crate) fn summary(latency: &str) -> String {
     format!("First in the chain · sums a stereo source to mono · the path waits {latency}")
@@ -36,9 +38,52 @@ const SEMITONES_HINT: &str =
 const CENTS_HINT: &str = "A fine shift on top of the semitones, −50 to +50 cents.";
 const WET_HINT: &str = "How much of the shifted signal plays with the dry signal. \
      100 % (default) is the shifted signal only; less doubles the note, e.g. an octave down.";
+const ENGINE_HINT: &str = "Tight for single notes and power chords, Spectral for full chords.";
+const ENGINE_NAMES: [&str; 2] = ["Tight", "Spectral"];
+const ENGINE_HINTS: [&str; 2] = [
+    "Tight (default): low latency, attacks intact. Full chords chorus.",
+    "Spectral: keeps every chord clean. Its latency is the mode's.",
+];
+const MODE_HINT: &str = "Spectral's resolution. Longer resolves lower notes and waits longer.";
+const MODE_NAMES: [&str; 4] = ["Fast", "Balanced", "Quality", "Ultra"];
+const MODE_HINTS: [&str; 4] = [
+    "Fast: the shortest delay. Resolves partials about 63 Hz apart.",
+    "Balanced (default): resolves partials about 47 Hz apart.",
+    "Quality: the best octave down. Resolves partials about 23 Hz apart.",
+    "Ultra: the longest delay, about 40 ms. Resolves partials about 12 Hz apart; \
+     attacks smear the most.",
+];
 pub(crate) const DELAY_HINT: &str =
     "Shorter for single notes and power chords: tight and immediate. \
      Longer for full chords: smoother, but you hear every note that much later.";
+
+/// The settings' engine.  Destructured, so the UI's `.engine` scan
+/// (`src/tests.rs`) keeps meaning the app's engine field.
+pub(crate) fn engine_of(pitch: PitchSettings) -> PitchEngine {
+    let PitchSettings { engine, .. } = pitch;
+    engine
+}
+
+/// What the engine is called in the UI.
+pub(crate) fn engine_name(engine: PitchEngine) -> &'static str {
+    ENGINE_NAMES[engine_index(engine)]
+}
+
+fn engine_index(engine: PitchEngine) -> usize {
+    PitchEngine::ALL
+        .iter()
+        .position(|&e| e == engine)
+        .unwrap_or(0)
+}
+
+/// What the mode is called in the UI.
+pub(crate) fn mode_name(mode: PitchMode) -> &'static str {
+    MODE_NAMES[mode_index(mode)]
+}
+
+fn mode_index(mode: PitchMode) -> usize {
+    PitchMode::ALL.iter().position(|&m| m == mode).unwrap_or(1)
+}
 
 /// The header's three states, in their order.
 pub(crate) const STATES: [&str; 3] = ["On", "Bypass", "Off"];
@@ -155,7 +200,8 @@ impl RigWerkApp {
             return;
         };
         let current = signal.mix.pitch;
-        let summary = summary(&format_ms(self.pitch_latency_ms(current.delay_ms)));
+        let latency = format_ms(self.pitch_latency_ms(current));
+        let summary = summary(&latency);
         let colours = palette(ui.ctx());
         let mut pitch = current;
         let mut reset = false;
@@ -182,9 +228,13 @@ impl RigWerkApp {
 
         ui.vertical(|ui| {
             ui.set_width(ui.available_width().min(MAX_CONTROLS_W));
-            controls(ui, &mut pitch, colours, path);
+            controls(ui, &mut pitch, colours, path, &latency);
             ui.add_space(6.0);
-            hint(ui, USE_HINT, colours);
+            let use_hint = match engine_of(current) {
+                PitchEngine::Tight => USE_HINT,
+                PitchEngine::Spectral => SPECTRAL_USE_HINT,
+            };
+            hint(ui, use_hint, colours);
         });
 
         if pitch != current {
@@ -215,6 +265,16 @@ impl RigWerkApp {
                     1 => "Pitch bypassed.",
                     _ => "Pitch off.",
                 },
+                LogTone::Amber,
+            );
+        } else if engine_of(pitch) != engine_of(current) {
+            self.push_log(
+                format!("Pitch engine: {}.", engine_name(engine_of(pitch))),
+                LogTone::Amber,
+            );
+        } else if pitch.mode != current.mode {
+            self.push_log(
+                format!("Pitch mode: {}.", mode_name(pitch.mode)),
                 LogTone::Amber,
             );
         }
@@ -268,7 +328,13 @@ fn row(
     );
 }
 
-fn controls(ui: &mut egui::Ui, pitch: &mut PitchSettings, colours: &Palette, path: usize) {
+fn controls(
+    ui: &mut egui::Ui,
+    pitch: &mut PitchSettings,
+    colours: &Palette,
+    path: usize,
+    latency: &str,
+) {
     ui.spacing_mut().item_spacing.y = 4.0;
     let semitones_text = format_semitones(pitch.semitones);
     row(
@@ -343,6 +409,27 @@ fn controls(ui: &mut egui::Ui, pitch: &mut PitchSettings, colours: &Palette, pat
             .width(width);
         styled_slider(ui, &mut pitch.wet, 0.0, 1.0, 0.01, style).on_hover_text(WET_HINT);
     });
+    let engine = engine_of(*pitch);
+    let mut choice = engine_index(engine);
+    let tight = engine == PitchEngine::Tight;
+    let engine_value = if tight { "" } else { latency };
+    row(ui, "Engine", ENGINE_HINT, engine_value, colours, |ui, _| {
+        if segmented_hinted(ui, &mut choice, &ENGINE_NAMES, &ENGINE_HINTS).changed() {
+            *pitch = PitchSettings {
+                engine: PitchEngine::ALL[choice],
+                ..*pitch
+            };
+        }
+    });
+    if !tight {
+        let mut choice = mode_index(pitch.mode);
+        row(ui, "Mode", MODE_HINT, "", colours, |ui, _| {
+            if segmented_hinted(ui, &mut choice, &MODE_NAMES, &MODE_HINTS).changed() {
+                pitch.mode = PitchMode::ALL[choice];
+            }
+        });
+        return;
+    }
     // Every delay change dips the path, so a drag applies only on release.
     // The draft is per path, and only the release of a drag (or a click or
     // key on the slider) commits: a sheet closed mid-drag leaves a draft

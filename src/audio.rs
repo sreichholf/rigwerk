@@ -133,8 +133,8 @@ pub use path::{
 };
 pub(crate) use pitch::pitch_latency_samples;
 pub use pitch::{
-    PitchSettings, PITCH_MAX_CENTS, PITCH_MAX_DELAY_MS, PITCH_MAX_SEMITONES, PITCH_MIN_CENTS,
-    PITCH_MIN_DELAY_MS, PITCH_MIN_SEMITONES,
+    PitchEngine, PitchMode, PitchSettings, PITCH_MAX_CENTS, PITCH_MAX_DELAY_MS,
+    PITCH_MAX_SEMITONES, PITCH_MIN_CENTS, PITCH_MIN_DELAY_MS, PITCH_MIN_SEMITONES,
 };
 #[cfg(test)]
 pub(crate) use plugins::vst3_fixture;
